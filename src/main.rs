@@ -28,7 +28,7 @@ use tracing::{error, info, warn};
 
 
 /// Configuration for the proxy server.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Config {
     /// Port to listen on (default: 4141, or PROXY_PORT env var)
@@ -42,6 +42,11 @@ struct Config {
     /// Graceful shutdown timeout in seconds (default: 30)
     #[arg(long, env = "SHUTDOWN_TIMEOUT", default_value = "30")]
     shutdown_timeout: u64,
+
+    /// Optional upstream URL for reverse proxy mode (e.g., "http://backend:8080")
+    /// When set, all requests are forwarded to this upstream instead of using the request's target
+    #[arg(long, env = "UPSTREAM_URL")]
+    upstream_url: Option<String>,
 }
 
 /// Connection tracker for graceful shutdown.
@@ -93,10 +98,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "ThoughtGate Proxy starting"
     );
 
-    let proxy_service = ProxyService::new();
+    let proxy_service = Arc::new(ProxyService::new_with_upstream(config.upstream_url.clone()));
     let service_stack = ServiceBuilder::new()
         .layer(LoggingLayer)
-        .service(proxy_service);
+        .service(proxy_service.as_ref().clone());
 
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let shutdown_tx_clone = shutdown_tx.clone();
@@ -209,9 +214,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Handle a single connection, detecting CONNECT vs normal HTTP.
+/// Handle a single connection with HTTP protocol.
 async fn handle_connection<S>(
-    stream: TcpStream,
+    mut stream: TcpStream,
     _peer_addr: SocketAddr,
     service: S,
     shutdown_rx: &mut broadcast::Receiver<()>,
@@ -226,104 +231,64 @@ where
         + 'static,
     S::Future: Send + 'static,
 {
+    // Peek to detect CONNECT method and reject it immediately
     let mut peek_buf = [0u8; 7];
-    let peek_result = {
-        
-        stream.peek(&mut peek_buf).await
-    };
-
-    match peek_result {
-        Ok(n) if n >= 7 && &peek_buf[..7] == b"CONNECT" => {
-            handle_connect(stream, _peer_addr).await
-        }
-        _ => {
-            let io = TokioIo::new(stream);
+    if let Ok(n) = stream.peek(&mut peek_buf).await {
+        if n >= 7 && &peek_buf[..7] == b"CONNECT" {
+            use tokio::io::AsyncWriteExt;
             
-            let svc_fn = hyper::service::service_fn(move |req| {
-                let mut svc = service.clone();
-                async move {
-                    svc.call(req).await.map_err(|e| {
-                        error!(error = %e, "Service error");
-                        format!("{}", e)
-                    })
-                }
-            });
-
-            let executor = hyper_util::rt::TokioExecutor::new();
-            let builder = auto::Builder::new(executor);
-            let conn = builder.serve_connection_with_upgrades(io, svc_fn);
-
-            tokio::pin!(conn);
-
-            tokio::select! {
-                result = &mut conn => {
-                    if let Err(e) = result {
-                        error!(error = %e, "Connection error");
-                    }
-                }
-                _ = shutdown_rx.recv() => {
-                    info!("Shutdown signal received, gracefully closing connection");
-                    conn.as_mut().graceful_shutdown();
-                    let _ = tokio::time::timeout(Duration::from_secs(5), conn).await;
-                }
-            }
-
-            Ok(())
+            warn!("Rejected CONNECT request - ThoughtGate is a termination proxy");
+            
+            let body = "405 Method Not Allowed\n\n\
+                 ThoughtGate is a termination proxy for AI governance.\n\
+                 It requires visibility into request headers and bodies.\n\n\
+                 Send plain HTTP requests to http://127.0.0.1:4141 instead.";
+            let content_length = body.as_bytes().len();
+            let response = format!(
+                "HTTP/1.1 405 Method Not Allowed\r\n\
+                 Content-Type: text/plain\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 {}",
+                content_length, body
+            );
+            
+            let _ = stream.write_all(response.as_bytes()).await;
+            return Ok(());
         }
     }
-}
-
-/// Handle CONNECT method for HTTPS tunneling.
-async fn handle_connect(
-    mut stream: TcpStream,
-    _peer_addr: SocketAddr,
-) -> Result<(), ProxyError> {
-    use tokio::io::AsyncReadExt;
     
-    // Read CONNECT request using buffering to avoid byte-by-byte syscalls
-    const BUFFER_SIZE: usize = 4096;
-    let mut buffer = Vec::with_capacity(BUFFER_SIZE);
-    let mut read_buf = [0u8; BUFFER_SIZE];
+    let io = TokioIo::new(stream);
     
-    loop {
-        let n = stream.read(&mut read_buf).await?;
-        if n == 0 {
-            return Err(ProxyError::Connection(
-                "Connection closed before CONNECT request complete".to_string()
-            ));
+    let svc_fn = hyper::service::service_fn(move |req| {
+        let mut svc = service.clone();
+        async move {
+            svc.call(req).await.map_err(|e| {
+                error!(error = %e, "Service error");
+                format!("{}", e)
+            })
         }
-        
-        buffer.extend_from_slice(&read_buf[..n]);
-        
-        if buffer.len() >= 4 {
-            let search_start = buffer.len().saturating_sub(n + 3);
-            if let Some(_pos) = buffer[search_start..]
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-            {
-                break;
+    });
+
+    let executor = hyper_util::rt::TokioExecutor::new();
+    let builder = auto::Builder::new(executor);
+    let conn = builder.serve_connection_with_upgrades(io, svc_fn);
+
+    tokio::pin!(conn);
+
+    tokio::select! {
+        result = &mut conn => {
+            if let Err(e) = result {
+                error!(error = %e, "Connection error");
             }
         }
-        
-        if buffer.len() > 8192 {
-            return Err(ProxyError::InvalidUri(
-                "CONNECT request too large".to_string()
-            ));
+        _ = shutdown_rx.recv() => {
+            info!("Shutdown signal received, gracefully closing connection");
+            conn.as_mut().graceful_shutdown();
+            let _ = tokio::time::timeout(Duration::from_secs(5), conn).await;
         }
     }
 
-    let request_str = String::from_utf8_lossy(&buffer);
-    let authority = request_str
-        .lines()
-        .next()
-        .and_then(|line| {
-            line.split_whitespace()
-                .nth(1)
-                .map(|s| s.to_string())
-        })
-        .ok_or_else(|| ProxyError::InvalidUri("Invalid CONNECT request".to_string()))?;
-
-    let proxy_service = ProxyService::new();
-    proxy_service.handle_connect(_peer_addr, stream, &authority).await
+    Ok(())
 }
-

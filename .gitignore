@@ -18,3 +18,5 @@ Thumbs.db
 # Logs
 *.log
 
+# Test artifacts
+bench_metrics.json

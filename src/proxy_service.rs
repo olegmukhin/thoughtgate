@@ -1,35 +1,34 @@
 //! Core proxy service implementation.
 
 use crate::error::{ProxyError, ProxyResult};
-use http::Uri;
-use http_body_util::{BodyStream, StreamBody};
+use http::{StatusCode, Uri};
+use http_body_util::{BodyStream, StreamBody, Full};
 use hyper::body::Incoming;
 use hyper::{Request, Response};
-use hyper_util::client::legacy::Client;
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use bytes::Bytes;
 use futures_util::StreamExt;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::io::{self, AsyncWriteExt, split};
-use tokio::net::TcpStream;
 use tower::Service;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// Type alias for the client's streaming body type.
 type ClientBody = http_body_util::combinators::BoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Main proxy service that handles HTTP requests and CONNECT tunneling.
+/// Main proxy service that handles HTTP and HTTPS requests with full TLS support.
 pub struct ProxyService {
-    /// Arc-wrapped HTTP client for upstream connections with streaming support.
-    /// Type-erased to avoid exposing connector implementation details.
-    client: Arc<dyn Fn(Request<ClientBody>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response<Incoming>, hyper_util::client::legacy::Error>> + Send>> + Send + Sync>,
+    /// HTTPS-capable client for upstream connections with streaming support.
+    client: Client<HttpsConnector<HttpConnector>, ClientBody>,
+    /// Optional fixed upstream URL for reverse proxy mode
+    upstream_url: Option<String>,
 }
 
 impl Clone for ProxyService {
     fn clone(&self) -> Self {
         Self {
-            client: Arc::clone(&self.client),
+            client: self.client.clone(),
+            upstream_url: self.upstream_url.clone(),
         }
     }
 }
@@ -37,23 +36,31 @@ impl Clone for ProxyService {
 impl ProxyService {
     /// Create a new proxy service with default HTTP client configuration.
     pub fn new() -> Self {
+        Self::new_with_upstream(None)
+    }
+
+    /// Create a new proxy service with optional upstream URL for reverse proxy mode.
+    pub fn new_with_upstream(upstream_url: Option<String>) -> Self {
+        // Build HTTPS connector with native OS certificate store
+        let https_connector = HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .expect("Failed to load native TLS roots")
+            .https_or_http()
+            .enable_http1()
+            .enable_http2()
+            .build();
+
         let client = Client::builder(TokioExecutor::new())
             .http1_preserve_header_case(true)
             .http1_title_case_headers(true)
             .http1_allow_obsolete_multiline_headers_in_responses(true)
             .http2_keep_alive_while_idle(true)
-            .build_http::<ClientBody>();
+            .build(https_connector);
         
-        // Wrap client in Arc for cloning support
-        let client_arc = Arc::new(client);
-        let client_fn: Arc<dyn Fn(Request<ClientBody>) -> _ + Send + Sync> = Arc::new(move |req: Request<ClientBody>| {
-            let client = Arc::clone(&client_arc);
-            Box::pin(async move {
-                (*client).request(req).await
-            }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response<Incoming>, hyper_util::client::legacy::Error>> + Send>>
-        });
-        
-        Self { client: client_fn }
+        Self { 
+            client,
+            upstream_url,
+        }
     }
 
     /// Handle an incoming HTTP request with zero-copy streaming.
@@ -112,8 +119,8 @@ impl ProxyService {
             })?;
 
         // Send request and stream response (zero-copy, no buffering)
-        let fut = (self.client)(upstream_req);
-        let upstream_res = fut
+        let upstream_res = self.client
+            .request(upstream_req)
             .await
             .map_err(|e| {
                 error!(error = %e, "Upstream client error");
@@ -125,6 +132,18 @@ impl ProxyService {
 
     /// Extract target URI from request.
     fn extract_target_uri(&self, req: &Request<Incoming>) -> ProxyResult<Uri> {
+        // If upstream URL is configured (reverse proxy mode), use it
+        if let Some(upstream) = &self.upstream_url {
+            let path = req.uri().path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/");
+            let full_uri = format!("{}{}", upstream.trim_end_matches('/'), path);
+            return full_uri
+                .parse()
+                .map_err(|e| ProxyError::InvalidUri(format!("Failed to parse upstream URI: {}", e)));
+        }
+
+        // Otherwise, use forward proxy mode
         let uri = req.uri();
 
         // Use absolute URI if present
@@ -151,82 +170,6 @@ impl ProxyService {
         Err(ProxyError::InvalidUri(
             "Cannot determine target URI from request".to_string(),
         ))
-    }
-
-    /// Handle CONNECT method for HTTPS tunneling.
-    pub async fn handle_connect(
-        &self,
-        _addr: SocketAddr,
-        mut stream: TcpStream,
-        authority: &str,
-    ) -> ProxyResult<()> {
-        info!(
-            authority = authority,
-            "CONNECT request received"
-        );
-
-        // Parse authority (host:port)
-        let (host, port) = parse_authority(authority)?;
-        let target = format!("{}:{}", host, port);
-
-        // Connect to upstream
-        let upstream = TcpStream::connect(&target)
-            .await
-            .map_err(|e| {
-                error!(
-                    target = %target,
-                    error = %e,
-                    "Failed to connect to upstream"
-                );
-                ProxyError::Connection(format!("Failed to connect to {}: {}", target, e))
-            })?;
-
-        info!(
-            target = %target,
-            "Connected to upstream, starting tunnel"
-        );
-
-        // Send 200 Connection Established
-        let response = "HTTP/1.1 200 Connection Established\r\n\r\n";
-        stream
-            .write_all(response.as_bytes())
-            .await
-            .map_err(|e| ProxyError::Io(e))?;
-
-        // Bidirectional tunnel using owned stream halves
-        let (mut client_read, mut client_write) = split(stream);
-        let (mut upstream_read, mut upstream_write) = split(upstream);
-
-        let client_to_upstream = tokio::spawn(async move {
-            let copied = io::copy(&mut client_read, &mut upstream_write).await;
-            if let Err(e) = copied {
-                warn!(error = %e, "Client->Upstream copy error");
-            } else {
-                debug!(bytes = copied.unwrap_or(0), "Client->Upstream copy completed");
-            }
-        });
-
-        let upstream_to_client = tokio::spawn(async move {
-            let copied = io::copy(&mut upstream_read, &mut client_write).await;
-            if let Err(e) = copied {
-                warn!(error = %e, "Upstream->Client copy error");
-            } else {
-                debug!(bytes = copied.unwrap_or(0), "Upstream->Client copy completed");
-            }
-        });
-
-        // Wait for either direction to complete
-        tokio::select! {
-            _ = client_to_upstream => {
-                debug!("Client->Upstream tunnel closed");
-            }
-            _ = upstream_to_client => {
-                debug!("Upstream->Client tunnel closed");
-            }
-        }
-
-        info!(authority = authority, "CONNECT tunnel closed");
-        Ok(())
     }
 }
 
@@ -283,18 +226,3 @@ fn extract_port(uri: &Uri) -> ProxyResult<u16> {
         }
     }
 }
-
-/// Parse authority string (host:port) into host and port.
-fn parse_authority(authority: &str) -> ProxyResult<(String, u16)> {
-    if let Some(colon_pos) = authority.rfind(':') {
-        let host = authority[..colon_pos].to_string();
-        let port_str = &authority[colon_pos + 1..];
-        let port = port_str
-            .parse::<u16>()
-            .map_err(|_| ProxyError::InvalidUri(format!("Invalid port: {}", port_str)))?;
-        Ok((host, port))
-    } else {
-        Ok((authority.to_string(), 443))
-    }
-}
-

@@ -1,0 +1,137 @@
+# Mock Service
+apiVersion: v1
+kind: Service
+metadata: 
+  name: mock-llm
+spec:
+  selector: 
+    app: mock-llm
+  ports: 
+    - port: 80
+      targetPort: 8080
+---
+# Mock Pod
+apiVersion: v1
+kind: Pod
+metadata: 
+  name: mock-llm-pod
+  labels: 
+    app: mock-llm
+spec:
+  containers:
+    - name: server
+      image: thoughtgate:test
+      imagePullPolicy: Never
+      command: ["/mock_llm"]
+      ports: 
+        - containerPort: 8080
+      # SAFETY: Readiness probe ensures pod is ready before receiving traffic
+      readinessProbe:
+        tcpSocket:
+          port: 8080
+        initialDelaySeconds: 2
+        periodSeconds: 2
+      # SAFETY: Resource limits prevent OOM
+      resources:
+        limits: 
+          cpu: "500m"
+          memory: "128Mi"
+        requests: 
+          cpu: "100m"
+          memory: "64Mi"
+---
+# Test Job
+apiVersion: batch/v1
+kind: Job
+metadata: 
+  name: perf-test
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      # NOTE: shareProcessNamespace allows K6 to signal the proxy to shut down after tests complete
+      shareProcessNamespace: true
+      restartPolicy: Never
+      containers:
+        # 1. K6 Agent
+        - name: k6
+          image: grafana/k6:0.54.0
+          imagePullPolicy: IfNotPresent
+          # SAFETY: Wait for proxy startup with portable health check, then run tests
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "Waiting for ThoughtGate proxy to start..."
+              until wget --spider -q http://127.0.0.1:4141 2>/dev/null; do
+                echo "Proxy not ready yet, retrying..."
+                sleep 1
+              done
+              echo "ThoughtGate proxy is ready!"
+              echo "Starting K6 tests..."
+              k6 run /scripts/benchmark.js --out json=/results/results.json
+              EXIT_CODE=$?
+              echo "K6 finished with exit code: $EXIT_CODE"
+              echo "Signaling ThoughtGate proxy to terminate..."
+              PROXY_PID=$(ps aux | grep '/thoughtgate' | grep -v grep | awk '{print $2}' | head -1)
+              if [ -n "$PROXY_PID" ]; then
+                echo "Sending SIGTERM to ThoughtGate (PID: $PROXY_PID)"
+                kill $PROXY_PID 2>/dev/null || true
+                sleep 2
+              fi
+              exit $EXIT_CODE
+          volumeMounts: 
+            - name: scripts
+              mountPath: /scripts
+            - name: results
+              mountPath: /results
+          resources:
+            limits: 
+              cpu: "300m"
+              memory: "128Mi"
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+
+        # 2. ThoughtGate Proxy (sidecar - will be terminated by K6)
+        - name: thoughtgate
+          image: thoughtgate:test
+          imagePullPolicy: Never
+          args: ["--port", "4141", "--bind", "0.0.0.0", "--upstream-url", "http://mock-llm"]
+          # SAFETY: Readiness probe signals when proxy is ready
+          readinessProbe:
+            tcpSocket:
+              port: 4141
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          resources:
+            limits: 
+              cpu: "300m"
+              memory: "128Mi"
+            requests: 
+              cpu: "50m"
+              memory: "32Mi"
+          # Handle graceful shutdown when K6 completes
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 1"]
+        
+        # 3. Busybox sidecar for file extraction (sleeps indefinitely)
+        - name: file-extractor
+          image: busybox:1.36.1
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+          volumeMounts:
+            - name: results
+              mountPath: /results
+          resources:
+            limits:
+              cpu: "50m"
+              memory: "16Mi"
+      
+      volumes:
+        - name: scripts
+          configMap: 
+            name: k6-script
+        - name: results
+          emptyDir: {}

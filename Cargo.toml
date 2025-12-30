@@ -18,6 +18,10 @@ http = "1"
 bytes = "1"
 httparse = "1"
 
+# HTTPS/TLS support for upstream connections
+hyper-rustls = { version = "0.27", features = ["http1", "http2", "native-tokio", "ring"] }
+rustls = "0.23"
+
 # Stream utilities for zero-copy streaming
 futures-util = "0.3"
 
@@ -34,6 +38,37 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Error handling
 thiserror = "2"
+
+# Mock server framework (only needed for mock_llm test binary)
+# Marked as optional to avoid including in main thoughtgate binary
+axum = { version = "0.7", optional = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+
+[[bin]]
+name = "mock_llm"
+path = "src/bin/mock_llm.rs"
+required-features = ["mock"]
+
+[features]
+mock = ["axum", "serde", "serde_json"]
+
+[dev-dependencies]
+# Kubernetes orchestration
+kube = { version = "0.87", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.20", features = ["v1_27"] }
+
+# Async utilities
+futures = "0.3"
+anyhow = "1.0"
+
+# Serialization (for test metrics)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Testing utilities
+rand = "0.8"
+serial_test = "3.0"
 
 [profile.release]
 opt-level = 3
