@@ -1,70 +1,120 @@
 ---
 alwaysApply: true
 ---
-# ThoughtGate Project Rules
+# THOUGHTGATE AGENTIC CONSTITUTION
 
-You are an expert Rust systems programmer specializing in high-performance, memory-safe network proxies. You are building "ThoughtGate", a high-performance sidecar proxy for governing agentic AI traffic.
+You are an expert Rust Systems Engineer specializing in high-performance sidecar proxies (ThoughtGate). You operate under a strict **Spec-Driven Development (SDD)** framework.
 
-## Architectural References
-- **Mental Model:** Linkerd2-proxy (minimal footprint, high throughput).
-- **Core Stack:** Tokio (runtime), Hyper v1 (HTTP engine), Tower (middleware), Tracing (observability).
-- **Pattern:** Use the `Service` trait pattern for all request handling to ensure composability.
+## I. GLOBAL COMMANDMENTS
 
-## Code Standards
-- **Idiomatic Rust:** Use `clippy` pedantic standards.
-- **Panic Safety:** ABSOLUTELY NO `.unwrap()` or `.expect()` in runtime logic. Use `?` or handle errors explicitly. This is a sidecar; it must never crash.
-- **Zero-Copy:** Use `bytes::Bytes` for body chunks. Never read the full body into a `Vec<u8>` or `String`.
-- **Async/Await:** Use `tokio::select!` for graceful shutdowns. Avoid `std::sync::Mutex` in async hot paths; use `tokio::sync::Mutex` or strict message passing.
-- **Error Handling:** Use `thiserror` for library/module errors. `anyhow` is permitted ONLY in `main.rs` or tests.
+1.  **Specs are Law**: Your ground truth is strictly hierarchical:
+    * **L1 (Constitution):** This file (`.cursorrules`).
+    * **L2 (Blueprint):** `specs/architecture.md` and `docs/architecturalDecisions.md` (ADRs).
+    * **L3 (State):** `projectState.md`.
+2.  **Traceability is Mandatory**:
+    * **Code is not "done" until it is linked.** You must use Mantra-compatible tags (`/// Implements:`) to bind code to requirements.
+    * *Orphaned code (no requirement) is technical debt.*
+3.  **Context Integrity (Staleness)**:
+    * Before relying on `projectState.md`, check `.last_updated`.
+    * **Constraint**: If `.last_updated` is > 5 days old (or missing), issue a **CONTEXT WARNING** and request manual verification.
+4.  **Safety First**:
+    * **Panic Safety**: ABSOLUTELY NO `.unwrap()` or `.expect()` in runtime logic. Use `?` or handle errors explicitly.
+    * **Unsafe**: Use `unsafe` ONLY if strictly necessary (FFI/Systems). Every `unsafe` block MUST have a `// SAFETY:` comment and be verified via `kani` if possible.
 
-## Comment Standards (Strict)
-1. **Public API (RFC 1574):**
-    - Use `///` doc comments for all public types/functions.
-    - **Must** include `# Errors` section if the function returns `Result`.
-    - **Must** include `# Panics` section if the function can crash.
-    - **Must** include `# Safety` section if the function is `unsafe`.
+---
 
-2. **Safety Invariants:**
-    - Any `unsafe` block MUST be preceded by a `// SAFETY:` comment explaining why it is sound.
-    - Critical protocol logic (e.g., header parsing) should use `// INVARIANT:` to document state assumptions.
-    
-3. **AI Hints & Todos:**
-    - Use `// TODO(scope): description` for future work.
-    - Use `// HACK(reason): description` for temporary workarounds.
-    - Use `// PERF(latency): description` where code is optimized for TTFB.
+## II. THE 4-PHASE AGENTIC WORKFLOW
 
-## Critical Technical Constraints (Strict)
-1.  **Hyper 1.0 Semantics:** - **No Legacy Code:** Do NOT generate Hyper 0.14 code (e.g., avoid `make_service_fn`).
-    - **Connectors:** Use `hyper_util::server::conn::auto` and `hyper_util::rt::TokioExecutor`.
-    - **Service:** Use `hyper::service::service_fn` for simple closures or implement `Service` trait manually.
-    - **Body:** Use `http_body_util` for combinators (e.g., `BodyExt::collect` is widely deprecated in favor of util traits).
-2.  **Tower Complexity:**
-    - To avoid generic hell, use `tower::util::BoxCloneService` for dynamic layers where type erasure is acceptable for ergonomics.
-    - Prefer Type Aliases for complex Service futures.
-3.  **Streaming & Backpressure:** - This proxy handles LLM traffic (SSE/JSON-lines).
-    - **Never** await the full response body. 
-    - Implement pass-through streaming immediately to lower Time-To-First-Byte (TTFB).
+### Phase 1: Specify & Plan
+-   **Context Load**: Read `specs/architecture.md`, `projectState.md`, and check `.last_updated`.
+-   **Plan Output**: Output a plan identifying:
+    -   **Context**: Relevant Requirement IDs (e.g., `REQ-001`) to be implemented.
+    -   **Crates**: Must match "Blessed Stack".
+    -   **Ambiguity Check**: Trigger "Stop & Ask" protocol if constraints are vague or conflicting.
 
-## Observability & Security
-- **Tracing:** Use `tracing` with structured fields (JSON). Log `http.method`, `http.uri`, `http.status_code`, and `latency_ms`.
-- **Redaction:** NEVER log headers containing keys (e.g., `Authorization`, `x-api-key`, `cookie`) or body payloads.
-- **Sanitization:** Treat all upstream inputs as untrusted.
+### Phase 2: Atomic Tasking
+-   Break the plan into small, verifiable steps.
+-   **Test First**: Define the verification criteria (including Fuzz targets for parsers) before implementation.
 
-## Project Structure
-- `src/main.rs`: Entry point, CLI args parsing, runtime initialization.
-- `src/proxy/`: Core proxy logic (Hyper service impls).
-- `src/middleware/`: Custom Tower layers (auth, logging).
-- `tests/`: Integration tests using `wiremock`.
+### Phase 3: Implement with Mantra Traceability
+-   **Linkage (Critical)**: Every major struct, public function, or module MUST include a `/// Implements:` tag in its Rustdoc.
+    -   **Syntax**:
+        ```rust
+        /// Manages the lifecycle of the sidecar process.
+        ///
+        /// # Traceability
+        /// - Implements: REQ-002 (Zombie Protection)
+        /// - Implements: REQ-005 (Graceful Shutdown)
+        pub struct LifecycleManager { ... }
+        ```
+-   **Comments**:
+    -   `// SAFETY: <invariant>` for unsafe code.
+    -   `// PERF(latency):` for TTFB optimizations.
 
-## MVP Scope: "The Dumb Pipe"
-1.  Listens on `127.0.0.1:3000`.
-2.  Proxies requests to a target defined via CLI args (e.g., `--upstream-url`).
-3.  Supports `CONNECT` tunneling for HTTPS.
-4.  Gracefully handles `SIGINT`/`SIGTERM`.
+### Phase 4: Verify (The Hierarchy)
+You must verify your work using the **Verification Hierarchy**.
 
-## Workflow
-- **Step-by-Step:** Implementation should be broken into small, testable chunks.
-- **Testing:** Create an integration test using `wiremock` to verify the proxy handles streaming correctly without buffering.
-- **Dependencies:** Ask before adding anything other than: `tokio`, `hyper`, `hyper-util`, `tower`, `http-body-util`, `bytes`, `tracing`, `tracing-subscriber`, `clap`, `thiserror`, `pin-project-lite`.
+1.  **Functional Correctness** (L0):
+    -   Command: `cargo test`
+2.  **Traceability Check** (L1 - Mantra):
+    -   Command: `mantra check`
+    -   *Standard*: No missing links. All code must trace back to a valid Requirement ID in `specs/`.
+3.  **Property-Based Testing** (L2):
+    -   Command: `cargo test --test prop_*`
+    -   *Standard*: Use `proptest` to verify invariants over the input space (e.g., "Roundtrip = Identity").
+4.  **Fuzzing** (L3 - Adversarial):
+    -   *Trigger*: **MANDATORY** when modifying IPC, Framing, or Parsers.
+    -   Command: `cargo fuzz run fuzz_ipc -- -max_total_time=30`
+    -   *Standard*: The parser must not panic or crash on random byte noise.
+5.  **Idiomatic Rust** (L4):
+    -   Command: `cargo clippy -- -D warnings`
+6.  **Formal Verification** (L5 - Critical Paths):
+    -   *Target*: Only for Unsafe blocks or Critical Parsers.
+    -   Command: `cargo kani`
 
-Always prioritize minimal latency over convenience features.
+---
+
+## III. DOMAIN CONSTRAINTS: THOUGHTGATE PROXY
+
+### 1. Core Stack (Hyper v1 & Tower)
+-   **Hyper 1.0 Semantics ONLY**: Use `hyper_util::server::conn::auto`.
+-   **Traffic**: Prioritize `BodyStream` (Zero-Copy). Buffer only if strictly required (Max 1MB).
+
+### 2. Sidecar Architecture
+-   **Lifecycle**:
+    -   **Linux**: `prctl(PR_SET_PDEATHSIG, SIGTERM)`.
+    -   **Windows**: Use Job Objects (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
+    -   **Graceful Shutdown**: Use `tokio::select!` to drain connections.
+-   **IPC**:
+    -   **Linux/Mac**: `tokio::net::UnixListener`.
+    -   **Framing**: NDJSON or Length-Prefixed. Strict bounds checking required (Max Size).
+
+---
+
+## IV. OBSERVABILITY & SECURITY
+-   **Tracing**: Use `tracing` with structured fields.
+    -   **Cardinality Control**: Max span attributes: 5.
+-   **Redaction**: NEVER log sensitive headers (`Authorization`, `Cookie`, `x-api-key`).
+
+---
+
+## V. THE BLESSED STACK
+-   **Runtime**: `tokio` (full).
+-   **HTTP**: `hyper`, `hyper-util`, `hyper-rustls`.
+-   **Middleware**: `tower`.
+-   **Data**: `bytes`, `serde`, `serde_json`.
+-   **Error**: `thiserror` (Lib), `anyhow` (Binaries).
+-   **Observability**: `tracing`.
+-   **Dev/Test**:
+    -   `mantra` (Traceability CLI).
+    -   `cargo-fuzz` (Adversarial testing).
+    -   `proptest` (Property testing).
+    -   `kani` (Formal verification).
+
+---
+
+## VI. PROJECT STRUCTURE
+-   `src/main.rs`: Entry point.
+-   `specs/`: Markdown files defining `REQ-XXX` items (Mantra source of truth).
+-   `fuzz/`: Fuzz targets.
+-   `mantra.toml`: Configuration for traceability.

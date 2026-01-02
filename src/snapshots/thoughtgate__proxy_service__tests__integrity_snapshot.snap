@@ -1,0 +1,18 @@
+---
+source: src/proxy_service.rs
+expression: snapshot_data
+---
+{
+  "forwarded_headers": {
+    "authorization": "Bearer secret-token",
+    "content-type": "application/json",
+    "host": "localhost:3000",
+    "transfer-encoding": "chunked",
+    "user-agent": "test-client/1.0",
+    "x-custom-header": "custom-value"
+  },
+  "method": "POST",
+  "target_uri": "https://upstream.example.com/v1/chat/completions?param=value",
+  "test_case": "reverse_proxy_with_filtering",
+  "version": "HTTP/1.1"
+}

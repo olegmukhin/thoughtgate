@@ -1,4 +1,7 @@
 //! Tower layer for structured request/response logging.
+//!
+//! # Traceability
+//! - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy - observability)
 
 use http::HeaderMap;
 use std::fmt;
@@ -7,6 +10,9 @@ use tower::Service;
 use tracing::{info, warn};
 
 /// Headers that are redacted from logs for security.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy - security)
 const SENSITIVE_HEADERS: &[&str] = &[
     "authorization",
     "cookie",
@@ -17,6 +23,14 @@ const SENSITIVE_HEADERS: &[&str] = &[
 ];
 
 /// Logging layer that wraps services and logs requests/responses.
+///
+/// This Tower layer provides structured JSON logging with:
+/// - Request/response latency tracking
+/// - Automatic redaction of sensitive headers
+/// - Zero-allocation header sanitization (only at DEBUG level)
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy - observability)
 #[derive(Clone, Debug)]
 pub struct LoggingLayer;
 
@@ -29,6 +43,9 @@ impl<S> tower::Layer<S> for LoggingLayer {
 }
 
 /// Service wrapper that adds logging.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy - observability)
 #[derive(Clone, Debug)]
 pub struct LoggingService<S> {
     inner: S,
@@ -133,14 +150,12 @@ impl<'a> fmt::Debug for SanitizedHeaders<'a> {
         
         for (name, value) in self.0.iter() {
             let name_str = name.as_str();
-            let is_sensitive = SENSITIVE_HEADERS.iter().any(|&sensitive| name_str == sensitive);
+            let is_sensitive = SENSITIVE_HEADERS.contains(&name_str);
             
             if is_sensitive {
                 map.entry(&name_str, &"[REDACTED]");
-            } else {
-                if let Ok(val_str) = value.to_str() {
-                    map.entry(&name_str, &val_str);
-                }
+            } else if let Ok(val_str) = value.to_str() {
+                map.entry(&name_str, &val_str);
             }
         }
         

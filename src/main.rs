@@ -1,8 +1,11 @@
 //! ThoughtGate - High-performance sidecar proxy for governing MCP and A2A agentic AI traffic.
 //!
 //! This proxy acts as a forward HTTP proxy that can be configured via HTTP_PROXY/HTTPS_PROXY
-//! environment variables. It supports full HTTP/1.1 and HTTP/2, including CONNECT tunneling
-//! for HTTPS connections.
+//! environment variables. It supports full HTTP/1.1 and HTTP/2, with zero-copy streaming
+//! for low-latency AI traffic.
+//!
+//! # Traceability
+//! - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy)
 
 mod error;
 mod logging_layer;
@@ -28,6 +31,9 @@ use tracing::{error, info, warn};
 
 
 /// Configuration for the proxy server.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy - configuration)
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Config {
@@ -50,6 +56,9 @@ struct Config {
 }
 
 /// Connection tracker for graceful shutdown.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy - connection management)
 #[derive(Clone)]
 struct ConnectionTracker {
     active_connections: Arc<AtomicUsize>,
@@ -98,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "ThoughtGate Proxy starting"
     );
 
-    let proxy_service = Arc::new(ProxyService::new_with_upstream(config.upstream_url.clone()));
+    let proxy_service = Arc::new(ProxyService::new_with_upstream(config.upstream_url.clone())?);
     let service_stack = ServiceBuilder::new()
         .layer(LoggingLayer)
         .service(proxy_service.as_ref().clone());
@@ -145,6 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match result {
                     Ok((stream, peer_addr)) => {
                         // Disable Nagle's algorithm for low-latency streaming
+                        // Implements: REQ-CORE-001 F-001 (TCP_NODELAY enforcement)
                         if let Err(e) = stream.set_nodelay(true) {
                             error!(error = %e, "Failed to set TCP_NODELAY");
                         }
@@ -203,7 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         sleep(Duration::from_millis(100)).await;
 
-        if start.elapsed().as_secs() % 5 == 0 {
+        if start.elapsed().as_secs().is_multiple_of(5) {
             info!(
                 active_connections = tracker_clone.count(),
                 elapsed_seconds = start.elapsed().as_secs(),
@@ -220,6 +230,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Handle a single connection with HTTP protocol.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 F-001 (TCP_NODELAY enforcement)
+/// - Implements: REQ-CORE-002 (Conditional Termination - CONNECT rejection)
 async fn handle_connection<S>(
     mut stream: TcpStream,
     _peer_addr: SocketAddr,
@@ -237,6 +251,7 @@ where
     S::Future: Send + 'static,
 {
     // Peek to detect CONNECT method and reject it immediately
+    // PERF(latency): Zero-copy peek avoids buffering overhead
     let mut peek_buf = [0u8; 7];
     if let Ok(n) = stream.peek(&mut peek_buf).await {
         if n >= 7 && &peek_buf[..7] == b"CONNECT" {
@@ -248,7 +263,7 @@ where
                  ThoughtGate is a termination proxy for AI governance.\n\
                  It requires visibility into request headers and bodies.\n\n\
                  Send plain HTTP requests to http://127.0.0.1:4141 instead.";
-            let content_length = body.as_bytes().len();
+            let content_length = body.len();
             let response = format!(
                 "HTTP/1.1 405 Method Not Allowed\r\n\
                  Content-Type: text/plain\r\n\

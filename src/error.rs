@@ -1,8 +1,17 @@
 //! Error types for the ThoughtGate proxy.
+//!
+//! # Traceability
+//! - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy)
 
 use thiserror::Error;
 
 /// Errors that can occur during proxy operations.
+///
+/// This enum uses `thiserror` to provide structured error types that preserve
+/// type information and enable explicit error handling throughout the proxy.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy - error handling)
 #[derive(Error, Debug)]
 pub enum ProxyError {
     /// HTTP protocol error
