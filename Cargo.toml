@@ -20,7 +20,7 @@ httparse = "1"
 
 # HTTPS/TLS support for upstream connections
 hyper-rustls = { version = "0.27", features = ["http1", "http2", "native-tokio", "ring"] }
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 
 # Stream utilities for zero-copy streaming
 futures-util = "0.3"

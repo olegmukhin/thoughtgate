@@ -1,21 +1,15 @@
-name: Fuzzing (Hybrid Strategy)
+name: Fuzzing (Nightly Deep Soak)
 
 on:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
   schedule:
-    # Run nightly at 02:00 UTC (deep soak mode)
+    # Run nightly at 02:00 UTC (deep soak mode - 1 hour per target)
     - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       duration:
         description: 'Fuzz duration in seconds'
         required: false
-        default: '60'
+        default: '3600'
         type: string
 
 env:
@@ -49,18 +43,14 @@ jobs:
       - name: Determine fuzz duration
         id: duration
         run: |
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            # Nightly: 1 hour deep soak
-            echo "seconds=3600" >> $GITHUB_OUTPUT
-            echo "mode=deep-soak" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             # Manual trigger: use input
             echo "seconds=${{ github.event.inputs.duration }}" >> $GITHUB_OUTPUT
             echo "mode=manual" >> $GITHUB_OUTPUT
           else
-            # PR/Push: 60 second smoke test
-            echo "seconds=60" >> $GITHUB_OUTPUT
-            echo "mode=smoke-test" >> $GITHUB_OUTPUT
+            # Nightly schedule: 1 hour deep soak
+            echo "seconds=3600" >> $GITHUB_OUTPUT
+            echo "mode=deep-soak" >> $GITHUB_OUTPUT
           fi
 
       - name: Restore fuzz corpus cache
