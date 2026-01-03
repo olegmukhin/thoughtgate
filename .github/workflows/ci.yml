@@ -35,6 +35,12 @@ jobs:
           shared-key: "checks"
           cache-on-failure: true
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-audit (pre-built binary)
+        run: cargo binstall --no-confirm cargo-audit
+
       - name: Check formatting
         run: cargo fmt -- --check
 
@@ -42,10 +48,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Security audit
-        uses: actions-rust-lang/audit@v1
-        with:
-          # Deny warnings to fail CI on vulnerabilities
-          denyWarnings: true
+        run: cargo audit --deny warnings
 
   # Stage 1b: Build Binaries
   build:
@@ -206,58 +209,113 @@ jobs:
           cache-on-failure: true
 
       - name: Run benchmarks
-        run: cargo bench --bench ttfb -- --save-baseline ci-benchmark
+        run: |
+          echo "Running TTFB benchmarks..."
+          cargo bench --bench ttfb -- --save-baseline ci-benchmark
+          
+          echo ""
+          echo "Benchmark complete. Checking output..."
+          ls -la target/criterion/ || echo "Warning: target/criterion not created"
           
       - name: Parse criterion output
         run: |
           echo "Extracting criterion benchmark results..."
+          
+          # Debug: Show what criterion generated
+          echo "=== Criterion directory structure ==="
+          find target/criterion -type f -name "estimates.json" 2>/dev/null || echo "No estimates.json files found"
+          
           python3 << 'PYEOF'
           import json
           from pathlib import Path
           
-          # Find all criterion benchmark results
+          def find_estimates_recursive(criterion_dir):
+              """Recursively find all estimates.json files under criterion directory"""
+              results = []
+              
+              for estimates_file in criterion_dir.rglob("estimates.json"):
+                  # Get the benchmark name from the path
+                  # Structure: target/criterion/<benchmark-name>/<baseline-or-new>/estimates.json
+                  rel_path = estimates_file.relative_to(criterion_dir)
+                  parts = rel_path.parts
+                  
+                  if len(parts) < 2:
+                      continue
+                  
+                  # The benchmark name is everything except the last part (baseline dir)
+                  bench_name = "/".join(parts[:-2]) if len(parts) > 2 else parts[0]
+                  baseline_dir = parts[-2]  # e.g., "ci-benchmark", "new", "base"
+                  
+                  # Prefer ci-benchmark, then new, then base
+                  priority = {"ci-benchmark": 0, "new": 1, "base": 2}.get(baseline_dir, 999)
+                  
+                  try:
+                      with open(estimates_file) as f:
+                          data = json.load(f)
+                          mean_ns = data["mean"]["point_estimate"]
+                          results.append({
+                              "name": bench_name,
+                              "baseline": baseline_dir,
+                              "priority": priority,
+                              "value": mean_ns,
+                              "file": str(estimates_file)
+                          })
+                  except (KeyError, json.JSONDecodeError) as e:
+                      print(f"Warning: Could not parse {estimates_file}: {e}")
+                      continue
+              
+              return results
+          
           criterion_dir = Path("target/criterion")
-          results = []
           
           if not criterion_dir.exists():
-              print("Warning: target/criterion not found, creating empty results")
-              with open("benchmark_results.json", "w") as f:
-                  json.dump([], f)
-              exit(0)
+              print("ERROR: target/criterion not found!")
+              print("Benchmark may not have run successfully.")
+              exit(1)
           
-          for bench_dir in criterion_dir.iterdir():
-              if not bench_dir.is_dir() or bench_dir.name == "report":
-                  continue
-                  
-              # Try to find estimates.json in the baseline directory
-              estimates_file = bench_dir / "ci-benchmark" / "estimates.json"
-              if not estimates_file.exists():
-                  print(f"Warning: {estimates_file} not found, skipping {bench_dir.name}")
-                  continue
-              
-              try:
-                  with open(estimates_file) as f:
-                      data = json.load(f)
-                      # Extract mean time in nanoseconds
-                      mean_ns = data["mean"]["point_estimate"]
-                      results.append({
-                          "name": bench_dir.name,
-                          "value": mean_ns,
-                          "unit": "ns"
-                      })
-                      print(f"✓ {bench_dir.name}: {mean_ns:.2f} ns")
-              except (KeyError, json.JSONDecodeError) as e:
-                  print(f"Error parsing {estimates_file}: {e}")
-                  continue
+          print(f"Scanning {criterion_dir} recursively...")
           
-          # Write results in benchmark-action customSmallerIsBetter format
+          all_results = find_estimates_recursive(criterion_dir)
+          
+          if not all_results:
+              print("\nERROR: No benchmark results found!")
+              print("Benchmark may have failed to run or produce output.")
+              exit(1)
+          
+          print(f"\nFound {len(all_results)} benchmark result(s):")
+          for r in all_results:
+              print(f"  - {r['name']} ({r['baseline']}): {r['value']:.2f} ns")
+          
+          # Group by benchmark name and pick the best baseline (lowest priority)
+          best_results = {}
+          for result in all_results:
+              name = result["name"]
+              if name not in best_results or result["priority"] < best_results[name]["priority"]:
+                  best_results[name] = result
+          
+          # Format for benchmark-action
+          final_results = [
+              {
+                  "name": name,
+                  "value": data["value"],
+                  "unit": "ns"
+              }
+              for name, data in best_results.items()
+          ]
+          
+          print(f"\nUsing {len(final_results)} benchmark result(s) for tracking:")
+          for r in final_results:
+              print(f"  ✓ {r['name']}: {r['value']:.2f} {r['unit']}")
+          
+          # Write results
           with open("benchmark_results.json", "w") as f:
-              json.dump(results, f, indent=2)
+              json.dump(final_results, f, indent=2)
           
-          print(f"\nExtracted {len(results)} benchmark results to benchmark_results.json")
+          print(f"\n✓ Wrote benchmark_results.json")
           PYEOF
           
-          echo "Benchmark results:"
+          echo ""
+          echo "=== Final benchmark results ==="
           cat benchmark_results.json
 
       - name: Store benchmark result (Push to main only)
