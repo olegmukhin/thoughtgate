@@ -20,6 +20,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -73,14 +74,8 @@ async fn test_100mb_stream_memory_profile() {
     let bytes_relayed = Arc::new(AtomicUsize::new(0));
     let bytes_relayed_clone = bytes_relayed.clone();
 
-    // Use a channel to signal when relay is ready
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-
     tokio::spawn(async move {
         let (mut client_socket, _) = relay_listener.accept().await.unwrap();
-
-        // Signal that relay is ready (after successful accept)
-        let _ = ready_tx.send(());
 
         let mut origin_socket = TcpStream::connect(origin_addr).await.unwrap();
 
@@ -105,11 +100,8 @@ async fn test_100mb_stream_memory_profile() {
         }
     });
 
-    // Wait for relay to be ready with timeout
-    tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx)
-        .await
-        .expect("Relay failed to start within timeout")
-        .expect("Relay startup failed");
+    // Give relay task a moment to start listening
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Client: Connect and receive 100MB
     let mut client = TcpStream::connect(relay_addr).await.unwrap();
