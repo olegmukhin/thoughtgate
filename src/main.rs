@@ -7,18 +7,14 @@
 //! # Traceability
 //! - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy)
 
-mod error;
-mod logging_layer;
-mod proxy_service;
-
 use clap::Parser;
-use error::ProxyError;
 use hyper::body::Incoming;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto;
-use logging_layer::LoggingLayer;
-use proxy_service::ProxyService;
+use thoughtgate::error::ProxyError;
+use thoughtgate::logging_layer::LoggingLayer;
+use thoughtgate::proxy_service::ProxyService;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
