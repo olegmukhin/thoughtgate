@@ -66,7 +66,7 @@ jobs:
           cargo build --release --bin mock_llm --features mock
 
       - name: Upload binaries as artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: binaries
           path: |
@@ -177,7 +177,7 @@ jobs:
           outputs: type=docker,dest=/tmp/thoughtgate-image.tar
 
       - name: Upload Docker image as artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: docker-image
           path: /tmp/thoughtgate-image.tar
@@ -229,7 +229,7 @@ jobs:
 
       - name: Upload performance metrics
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: k8s-performance-metrics
           path: bench_metrics.json
@@ -325,7 +325,7 @@ jobs:
           cat release-notes.md
 
       - name: Upload release notes
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: release-notes
           path: release-notes.md
