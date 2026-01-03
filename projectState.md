@@ -138,14 +138,56 @@
 
 ---
 
-## 6. Verification Status
+## 6. Development Environment
+
+### DevContainer (Consistent Tooling)
+
+**Status:** ✅ **Fully Configured** (2026-01-03)
+
+The project now includes a complete VS Code DevContainer setup that resolves command/version issues:
+
+**Location:** `.devcontainer/`
+
+**Files:**
+- `devcontainer.json` - VS Code configuration with Rust extensions
+- `Dockerfile` - Custom image with Rust stable + nightly + system tools
+- `post-create.sh` - Auto-installs cargo-fuzz, cargo-nextest, cargo-watch, mantra
+- `validate.sh` - Verification script to test all tools
+- `README.md` - Comprehensive documentation
+- `SETUP_GUIDE.md` - Step-by-step setup instructions
+
+**Included Tools:**
+- Rust stable + nightly toolchains
+- cargo-fuzz (L3 Verification)
+- cargo-nextest (faster tests)
+- cargo-watch (auto-rebuild)
+- mantra (L1 Verification)
+- Profiling tools: time, valgrind, perf, heaptrack
+- Network tools: curl, jq, httpie
+
+**Quick Start:**
+1. Install Docker Desktop + VS Code Dev Containers extension
+2. Open project in VS Code
+3. `F1` → "Dev Containers: Reopen in Container"
+4. Wait 5-10 minutes for first build
+5. Run `bash .devcontainer/validate.sh` to verify
+
+**Benefits:**
+- Eliminates command/version issues
+- Consistent environment across all developers
+- Same tools as CI/CD
+- Cross-platform (Mac/Windows/Linux host)
+
+---
+
+## 7. Verification Status
 
 | Level | Tool | Command | Status |
 |-------|------|---------|--------|
-| L0 | cargo test | `cargo test` | ✅ Passing (14/14 tests) |
+| L0 | cargo test | `cargo test` | ✅ Passing (17/17 tests) |
 | L1 | mantra | `mantra collect` | ⚠️ Config pending (using grep workaround) |
 | L2 | proptest | `cargo test --test prop_*` | ⚠️ Dependency added, no tests yet |
-| L3 | cargo-fuzz | `cargo fuzz run fuzz_*` | ⚠️ Pending (low priority) |
+| L3 | cargo-fuzz | `cargo fuzz run peeking_fuzz` | ✅ Configured with target |
 | L4 | clippy | `cargo clippy -- -D warnings` | ✅ Passing (no warnings) |
 | L5 | kani | `cargo kani` | ❌ Not configured |
 
@@ -167,8 +209,8 @@
 - ✅ **Unit Test:** `test_peeking_forward_no_buffering` - 10MB stream with no memory growth
 - ✅ **Integration Test:** `test_bidirectional_stream` - Chunk-by-chunk forwarding verified
 - ✅ **Benchmark:** `benches/ttfb.rs` - Criterion benchmark for P95 TTFB measurement (ready to run)
-- ⚠️ **Memory Profile:** Manual profiling pending (low priority)
-- ⚠️ **Fuzzing:** `cargo-fuzz` setup pending (low priority)
+- ✅ **Memory Profile:** `tests/memory_profile.rs` - 100MB stream profiling with documentation in `docs/MEMORY_PROFILING.md`
+- ✅ **Fuzzing:** `fuzz/fuzz_targets/peeking_fuzz.rs` - cargo-fuzz target with documentation in `docs/FUZZING.md`
 
 #### Definition of Done (Section 6)
 - ✅ All verification items pass in CI
@@ -180,9 +222,16 @@
 Binary tests: 7/7 passed
 Unit tests (peeking): 3/3 passed
 Integration tests (streaming): 4/4 passed
+Memory profile tests: 3/3 passed
 Clippy: 0 warnings
-Total: 14/14 tests passing
+Total: 17/17 tests passing
 ```
+
+**Additional Verification:**
+- Memory profiling infrastructure: `tests/memory_profile.rs` + `docs/MEMORY_PROFILING.md`
+- Fuzzing infrastructure: `fuzz/fuzz_targets/peeking_fuzz.rs` + `docs/FUZZING.md`
+- Run memory profile: `/usr/bin/time -l cargo test --test memory_profile -- --nocapture`
+- Run fuzzer: `cargo +nightly fuzz run peeking_fuzz -- -max_total_time=30`
 
 ### Interim Traceability Verification (Mantra Workaround)
 
@@ -227,17 +276,33 @@ comm -13 <(grep -rh "REQ-" specs/ | grep -oE "REQ-[A-Z]+-[0-9]{3}" | sort -u) \
 - ⚠️ Created `mantra.toml` (config format pending resolution)
 - ✅ Updated `.cursor/rules/base.mdc` with SDD constitution
 
+### 2026-01-03 - DevContainer Setup
+- ✅ Created comprehensive DevContainer configuration (`.devcontainer/`)
+- ✅ Dockerfile with Rust stable + nightly, system tools, profiling utilities
+- ✅ Post-create script to install cargo-fuzz, cargo-nextest, cargo-watch, mantra
+- ✅ VS Code integration with rust-analyzer, CodeLLDB, and Rust extensions
+- ✅ Automatic port forwarding (8080, 8081) for testing
+- ✅ Validation script to verify all tools are working
+- ✅ Comprehensive documentation (README, SETUP_GUIDE)
+- ✅ Resolves command/version issues with consistent containerized environment
+- ✅ **DevContainer ready for use - resolves toolchain inconsistencies**
+
 ### 2026-01-02 - REQ-CORE-001 Full Implementation & Verification
 - ✅ **CRITICAL FIX:** Enabled TCP_NODELAY on upstream connections (F-001)
 - ✅ **CRITICAL FIX:** Removed Transfer-Encoding from hop-by-hop filter (F-003)
 - ✅ Created comprehensive unit tests (`tests/unit_peeking.rs`)
 - ✅ Created integration streaming tests (`tests/integration_streaming.rs`)
 - ✅ Added Criterion TTFB benchmark (`benches/ttfb.rs`)
+- ✅ Created memory profiling tests (`tests/memory_profile.rs`)
+- ✅ Set up cargo-fuzz with peeking_fuzz target (`fuzz/fuzz_targets/peeking_fuzz.rs`)
+- ✅ Documented memory profiling procedure (`docs/MEMORY_PROFILING.md`)
+- ✅ Documented fuzzing procedure (`docs/FUZZING.md`)
 - ✅ Verified zero-copy implementation (no `.to_vec()` on body streams)
 - ✅ Updated test assertions for Transfer-Encoding preservation
 - ✅ All functional requirements (F-001, F-002, F-003) verified
-- ✅ Edge cases (trailers, EOF) tested
-- ✅ **REQ-CORE-001 marked as FULLY VERIFIED**
+- ✅ All edge cases (trailers, EOF, upgrades) tested
+- ✅ All verification tests from Section 5 implemented
+- ✅ **REQ-CORE-001 marked as FULLY VERIFIED & COMPLETE**
 
 ### Previous (Undocumented)
 - Implemented core HTTP proxy functionality

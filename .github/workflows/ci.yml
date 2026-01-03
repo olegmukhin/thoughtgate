@@ -1,0 +1,269 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - '**'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Stage 1: Build & Unit Tests
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --release --bin thoughtgate
+
+      - name: Build mock_llm binary
+        run: cargo build --release --bin mock_llm --features mock
+
+      - name: Run unit tests
+        run: cargo test --lib -- --nocapture
+
+      - name: Run integration tests - streaming
+        run: cargo test --test integration_streaming -- --nocapture
+
+      - name: Run integration tests - unit peeking
+        run: cargo test --test unit_peeking -- --nocapture
+
+      - name: Run integration tests - memory profile
+        run: cargo test --test memory_profile -- --nocapture
+
+      - name: Run benchmarks
+        run: cargo bench --bench ttfb --no-fail-fast
+
+      - name: Upload binaries as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: |
+            target/release/thoughtgate
+            target/release/mock_llm
+          retention-days: 7
+
+  # Stage 2: Build Container Image
+  build-container:
+    name: Build Container Image
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate Docker metadata
+        id: meta
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+            echo "tags=thoughtgate:${VERSION},thoughtgate:latest" >> $GITHUB_OUTPUT
+            echo "labels=version=${VERSION},commit=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/heads/main ]]; then
+            echo "tags=thoughtgate:main-${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+            echo "labels=commit=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          else
+            PR_NUMBER=${{ github.event.pull_request.number }}
+            echo "tags=thoughtgate:pr-${PR_NUMBER}" >> $GITHUB_OUTPUT
+            echo "labels=pr=${PR_NUMBER}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Docker image (amd64)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          tags: thoughtgate:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=docker,dest=/tmp/thoughtgate-image.tar
+
+      - name: Upload Docker image as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/thoughtgate-image.tar
+          retention-days: 1
+
+  # Stage 3: Kubernetes Integration Tests
+  k8s-tests:
+    name: Kubernetes Integration Tests
+    runs-on: ubuntu-latest
+    needs: build-container
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load --input /tmp/thoughtgate-image.tar
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1.8.0
+        with:
+          cluster_name: kind
+          wait: 30s
+
+      - name: Load image into Kind cluster
+        run: kind load docker-image thoughtgate:test --name kind
+
+      - name: Verify image loaded in Kind
+        run: |
+          docker exec kind-control-plane crictl images | grep thoughtgate || \
+          (echo "Failed to load image into Kind" && exit 1)
+
+      - name: Run Kubernetes integration tests
+        run: cargo test --test integration_k8s -- --nocapture
+
+      - name: Upload performance metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8s-performance-metrics
+          path: bench_metrics.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Dump Kind cluster logs on failure
+        if: failure()
+        run: |
+          echo "=== Kind cluster info ==="
+          kubectl cluster-info
+          echo "=== All pods ==="
+          kubectl get pods --all-namespaces
+          echo "=== Kind node logs ==="
+          kubectl get nodes -o wide
+          docker exec kind-control-plane journalctl --no-pager || true
+
+  # Stage 4: Publish Container (Tags Only)
+  publish:
+    name: Publish Container to GHCR
+    runs-on: ubuntu-latest
+    needs: k8s-tests
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    permissions:
+      contents: read
+      packages: write
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Publishing version: ${VERSION}"
+
+      - name: Generate Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') || is_default_branch }}
+          labels: |
+            org.opencontainers.image.title=ThoughtGate
+            org.opencontainers.image.description=High-performance sidecar proxy for governing MCP and A2A agentic AI traffic
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate release notes
+        run: |
+          echo "## Container Images" > release-notes.md
+          echo "" >> release-notes.md
+          echo "Published to GitHub Container Registry:" >> release-notes.md
+          echo "" >> release-notes.md
+          echo '```bash' >> release-notes.md
+          echo "docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}" >> release-notes.md
+          echo "docker pull ghcr.io/${{ github.repository }}:latest" >> release-notes.md
+          echo '```' >> release-notes.md
+          echo "" >> release-notes.md
+          echo "## Supported Architectures" >> release-notes.md
+          echo "- linux/amd64" >> release-notes.md
+          echo "- linux/arm64" >> release-notes.md
+          cat release-notes.md
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          retention-days: 90
+

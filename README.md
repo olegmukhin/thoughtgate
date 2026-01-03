@@ -1,5 +1,7 @@
 # ThoughtGate
 
+[![CI/CD Pipeline](https://github.com/olegmukhin/thoughtgate/actions/workflows/ci.yml/badge.svg)](https://github.com/olegmukhin/thoughtgate/actions/workflows/ci.yml)
+
 A high-performance, memory-safe sidecar proxy for governing MCP (Model Context Protocol) and A2A (Agent-to-Agent) agentic AI traffic. Built in Rust with zero-copy streaming, full HTTP/1.1 and HTTP/2 support, and production-ready observability.
 
 ## Vision
@@ -215,6 +217,17 @@ The following headers are automatically redacted in logs:
 
 ## Testing
 
+### Automated CI/CD Testing
+
+Every push to `main` and all pull requests automatically run:
+- **Unit tests** - Core proxy logic and utilities
+- **Integration tests** - Streaming, peeking, and memory profiling
+- **Kubernetes tests** - End-to-end deployment testing with Kind cluster
+- **Benchmarks** - TTFB and throughput validation
+- **Linting** - Clippy with warnings as errors
+
+See the [CI/CD Pipeline](.github/workflows/ci.yml) for details.
+
 ### Manual Testing
 
 1. **Start the proxy**:
@@ -240,13 +253,26 @@ The following headers are automatically redacted in logs:
    curl -N http://example.com/sse-endpoint
    ```
 
-### Integration Tests (Future)
+### Running Tests Locally
 
-Integration tests using `wiremock` to verify:
-- Streaming without buffering
-- CONNECT tunneling correctness
-- Header forwarding
-- Error handling
+```bash
+# Run all unit and integration tests (except K8s)
+cargo test
+
+# Run specific test suites
+cargo test --test integration_streaming
+cargo test --test unit_peeking
+cargo test --test memory_profile
+
+# Run benchmarks
+cargo bench --bench ttfb
+
+# Run linting
+cargo clippy -- -D warnings
+
+# Run Kubernetes integration tests (requires Kind cluster)
+just test-kind
+```
 
 ## Performance Considerations
 
@@ -254,6 +280,93 @@ Integration tests using `wiremock` to verify:
 - **Backpressure**: Respects client/server backpressure via Tokio streams
 - **Connection Pooling**: Hyper client maintains persistent connections
 - **Memory Safety**: Rust's ownership system prevents common proxy vulnerabilities
+
+## Release Process
+
+ThoughtGate uses automated container image publishing to GitHub Container Registry (GHCR).
+
+### Creating a Release
+
+1. **Tag the release**:
+   ```bash
+   git tag -a v0.1.0 -m "Release v0.1.0: Initial release with zero-copy streaming"
+   git push origin v0.1.0
+   ```
+
+2. **Automated CI/CD pipeline**:
+   - Runs all tests (unit, integration, K8s)
+   - Builds multi-arch container images (amd64 and arm64)
+   - Publishes to `ghcr.io/olegmukhin/thoughtgate:v0.1.0`
+   - Updates `ghcr.io/olegmukhin/thoughtgate:latest`
+
+3. **Pull the released image**:
+   ```bash
+   # Pull specific version
+   docker pull ghcr.io/olegmukhin/thoughtgate:v0.1.0
+   
+   # Pull latest release
+   docker pull ghcr.io/olegmukhin/thoughtgate:latest
+   ```
+
+### Running the Container
+
+```bash
+# Run the proxy in a container
+docker run -p 4141:4141 ghcr.io/olegmukhin/thoughtgate:v0.1.0 \
+  --port 4141 \
+  --bind 0.0.0.0 \
+  --upstream-url http://your-upstream-service
+
+# Run with custom configuration
+docker run -e RUST_LOG=debug -e PROXY_PORT=8080 \
+  -p 8080:8080 \
+  ghcr.io/olegmukhin/thoughtgate:latest
+```
+
+### Deployment in Kubernetes
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-app
+spec:
+  containers:
+  - name: app
+    image: my-app:latest
+    env:
+    - name: HTTP_PROXY
+      value: "http://127.0.0.1:4141"
+    - name: HTTPS_PROXY
+      value: "http://127.0.0.1:4141"
+  
+  # ThoughtGate sidecar
+  - name: thoughtgate
+    image: ghcr.io/olegmukhin/thoughtgate:v0.1.0
+    args: ["--port", "4141", "--bind", "0.0.0.0", "--upstream-url", "http://backend"]
+    ports:
+    - containerPort: 4141
+    resources:
+      limits:
+        cpu: "200m"
+        memory: "64Mi"
+      requests:
+        cpu: "50m"
+        memory: "32Mi"
+```
+
+### Versioning Strategy
+
+ThoughtGate follows [Semantic Versioning](https://semver.org/):
+- **MAJOR** version: Incompatible API changes
+- **MINOR** version: New functionality (backwards compatible)
+- **PATCH** version: Bug fixes (backwards compatible)
+
+Container images are tagged with:
+- Full version: `v0.1.0`
+- Major.minor: `v0.1` (tracks latest patch)
+- Major: `v0` (tracks latest minor and patch)
+- `latest` (tracks latest release)
 
 ## Dependencies
 

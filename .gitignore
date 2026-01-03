@@ -11,6 +11,9 @@ Cargo.lock
 *.swo
 *~
 
+# DevContainer
+.devcontainer/.tmp/
+
 # OS
 .DS_Store
 Thumbs.db
