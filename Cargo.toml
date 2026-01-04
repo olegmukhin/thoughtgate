@@ -19,8 +19,8 @@ bytes = "1"
 httparse = "1"
 
 # HTTPS/TLS support for upstream connections
-hyper-rustls = { version = "0.27", features = ["http1", "http2", "native-tokio", "ring"] }
-rustls = { version = "0.23", features = ["ring"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "log", "logging", "native-tokio", "ring", "rustls-native-certs", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 
 # Stream utilities for zero-copy streaming
 futures-util = "0.3"
@@ -64,7 +64,7 @@ kube = { version = "2.0", features = ["runtime", "derive"] }
 k8s-openapi = { version = "0.26", features = ["v1_30"] }
 
 # TLS support for kube client (must match main dependency)
-rustls = { version = "0.23", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 
 # Async utilities
 futures = "0.3"
