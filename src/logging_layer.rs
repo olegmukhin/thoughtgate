@@ -174,7 +174,7 @@ impl<'a> fmt::Debug for SanitizedHeaders<'a> {
             }
 
             let name_str = name.as_str();
-            
+
             // SAFETY: HTTP header names are case-insensitive (RFC 7230 Section 3.2)
             // Use zero-allocation case-insensitive comparison to prevent header value leakage
             let is_sensitive = SENSITIVE_HEADERS
@@ -193,7 +193,14 @@ impl<'a> fmt::Debug for SanitizedHeaders<'a> {
                         if val_str.len() <= MAX_VALUE_LEN {
                             map.entry(&name_str, &val_str);
                         } else {
-                            map.entry(&name_str, &format!("{}... ({} bytes)", &val_str[..MAX_VALUE_LEN], val_str.len()));
+                            map.entry(
+                                &name_str,
+                                &format!(
+                                    "{}... ({} bytes)",
+                                    &val_str[..MAX_VALUE_LEN],
+                                    val_str.len()
+                                ),
+                            );
                         }
                     }
                     Err(_) => {
