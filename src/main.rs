@@ -66,6 +66,25 @@ struct ConnectionTracker {
     active_connections: Arc<AtomicUsize>,
 }
 
+/// RAII guard that automatically decrements the connection counter when dropped.
+///
+/// This ensures the counter is decremented even if the task panics, preventing
+/// the graceful shutdown logic from waiting indefinitely for crashed connections.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 (Connection Management Safety)
+struct ConnectionGuard {
+    tracker: ConnectionTracker,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.tracker
+            .active_connections
+            .fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl ConnectionTracker {
     fn new() -> Self {
         Self {
@@ -73,12 +92,15 @@ impl ConnectionTracker {
         }
     }
 
-    fn increment(&self) {
+    /// Increment the connection counter and return an RAII guard.
+    ///
+    /// The guard will automatically decrement the counter when dropped,
+    /// even if the task panics.
+    fn track_connection(&self) -> ConnectionGuard {
         self.active_connections.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn decrement(&self) {
-        self.active_connections.fetch_sub(1, Ordering::SeqCst);
+        ConnectionGuard {
+            tracker: self.clone(),
+        }
     }
 
     fn count(&self) -> usize {
@@ -223,7 +245,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut conn_shutdown_rx = shutdown_tx.subscribe();
                         let tracker = connection_tracker.clone();
 
-                        tracker.increment();
+                        // RAII guard ensures decrement is called even if the task panics
+                        let conn_guard = tracker.track_connection();
 
                         tokio::spawn(async move {
                             if let Err(e) = handle_connection(
@@ -237,7 +260,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 error!(error = %e, "Connection handling error");
                             }
 
-                            tracker.decrement();
+                            // Explicit drops for clarity (both happen automatically at scope end)
+                            drop(conn_guard); // Decrements connection counter
                             drop(permit); // Release semaphore permit
                         });
                     }
@@ -478,4 +502,87 @@ async fn serve_metrics(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_guard_increments_and_decrements() {
+        let tracker = ConnectionTracker::new();
+        assert_eq!(tracker.count(), 0);
+
+        {
+            let _guard = tracker.track_connection();
+            assert_eq!(tracker.count(), 1);
+        }
+
+        // Guard dropped, counter should be back to 0
+        assert_eq!(tracker.count(), 0);
+    }
+
+    #[test]
+    fn test_connection_guard_multiple() {
+        let tracker = ConnectionTracker::new();
+        assert_eq!(tracker.count(), 0);
+
+        let _guard1 = tracker.track_connection();
+        assert_eq!(tracker.count(), 1);
+
+        let _guard2 = tracker.track_connection();
+        assert_eq!(tracker.count(), 2);
+
+        let _guard3 = tracker.track_connection();
+        assert_eq!(tracker.count(), 3);
+
+        drop(_guard1);
+        assert_eq!(tracker.count(), 2);
+
+        drop(_guard2);
+        assert_eq!(tracker.count(), 1);
+
+        drop(_guard3);
+        assert_eq!(tracker.count(), 0);
+    }
+
+    #[test]
+    fn test_connection_guard_panic_safety() {
+        let tracker = ConnectionTracker::new();
+        assert_eq!(tracker.count(), 0);
+
+        // Simulate a panic in a spawned task
+        let result = std::panic::catch_unwind(|| {
+            let _guard = tracker.track_connection();
+            assert_eq!(tracker.count(), 1);
+            panic!("Simulated panic in connection handler");
+        });
+
+        assert!(result.is_err());
+
+        // Even after panic, counter should be decremented
+        assert_eq!(tracker.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_connection_guard_async_panic_safety() {
+        let tracker = ConnectionTracker::new();
+        assert_eq!(tracker.count(), 0);
+
+        // Simulate what happens in the actual code: spawn a task that panics
+        let tracker_clone = tracker.clone();
+        let handle = tokio::spawn(async move {
+            let _guard = tracker_clone.track_connection();
+            // Simulate some async work
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            panic!("Simulated async panic");
+        });
+
+        // Wait for the task to complete (it will panic)
+        let result = handle.await;
+        assert!(result.is_err());
+
+        // Counter should be back to 0 even after panic
+        assert_eq!(tracker.count(), 0);
+    }
 }

@@ -22,9 +22,10 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures_util::FutureExt;
-use http::{Request, Response};
-use http_body_util::{BodyExt, Full, Limited};
+use futures_util::{stream, FutureExt};
+use http::{HeaderMap, Request, Response};
+use http_body::Frame;
+use http_body_util::{BodyExt, LengthLimitError, Limited, StreamBody};
 use hyper::body::Incoming;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
@@ -34,6 +35,23 @@ use crate::config::ProxyConfig;
 use crate::error::{ProxyError, ProxyResult};
 use crate::inspector::{Decision, InspectionContext, Inspector};
 use crate::metrics::{get_amber_metrics, AmberPathTimer, InspectorTimer};
+
+/// Helper type alias for bodies that may include trailers.
+///
+/// Uses `StreamBody` to support both data frames and trailer frames.
+type BodyWithTrailers =
+    StreamBody<stream::Iter<std::vec::IntoIter<Result<Frame<Bytes>, std::convert::Infallible>>>>;
+
+/// Create a body from bytes and optional trailers.
+///
+/// This helper ensures trailers are preserved per REQ-CORE-002 F-005.
+fn body_with_optional_trailers(data: Bytes, trailers: Option<HeaderMap>) -> BodyWithTrailers {
+    let mut frames = vec![Ok(Frame::data(data))];
+    if let Some(t) = trailers {
+        frames.push(Ok(Frame::trailers(t)));
+    }
+    StreamBody::new(stream::iter(frames))
+}
 
 /// The Buffered Forwarder handles Amber Path traffic.
 ///
@@ -139,7 +157,7 @@ impl BufferedForwarder {
     pub async fn process_request(
         &self,
         req: Request<Incoming>,
-    ) -> ProxyResult<Request<Full<Bytes>>> {
+    ) -> ProxyResult<Request<BodyWithTrailers>> {
         // 1. Try to acquire semaphore permit FIRST (before starting timer)
         let _permit = match self.semaphore.clone().try_acquire_owned() {
             Ok(permit) => permit,
@@ -169,7 +187,7 @@ impl BufferedForwarder {
         .await;
 
         match result {
-            Ok(Ok(buffered_body)) => {
+            Ok(Ok((buffered_body, trailers))) => {
                 // Record success metrics
                 if let Some(t) = timer {
                     t.finish_success(buffered_body.len() as u64);
@@ -182,8 +200,9 @@ impl BufferedForwarder {
                     .headers
                     .insert(http::header::CONTENT_LENGTH, buffered_body.len().into());
 
-                // 4. Reconstruct request with buffered body
-                Ok(Request::from_parts(parts, Full::new(buffered_body)))
+                // 4. Reconstruct request with buffered body and trailers (REQ-CORE-002 F-005)
+                let body = body_with_optional_trailers(buffered_body, trailers);
+                Ok(Request::from_parts(parts, body))
             }
             Ok(Err(e)) => {
                 // Record error type from ProxyError
@@ -222,7 +241,7 @@ impl BufferedForwarder {
     pub async fn process_response(
         &self,
         res: Response<Incoming>,
-    ) -> ProxyResult<Response<Full<Bytes>>> {
+    ) -> ProxyResult<Response<BodyWithTrailers>> {
         // 1. Try to acquire semaphore permit FIRST (before starting timer)
         let _permit = match self.semaphore.clone().try_acquire_owned() {
             Ok(permit) => permit,
@@ -263,7 +282,7 @@ impl BufferedForwarder {
         .await;
 
         match result {
-            Ok(Ok(buffered_body)) => {
+            Ok(Ok((buffered_body, trailers))) => {
                 // Record success metrics
                 if let Some(t) = timer {
                     t.finish_success(buffered_body.len() as u64);
@@ -276,8 +295,9 @@ impl BufferedForwarder {
                     .headers
                     .insert(http::header::CONTENT_LENGTH, buffered_body.len().into());
 
-                // 4. Reconstruct response with buffered body
-                Ok(Response::from_parts(parts, Full::new(buffered_body)))
+                // 4. Reconstruct response with buffered body and trailers (REQ-CORE-002 F-005)
+                let body = body_with_optional_trailers(buffered_body, trailers);
+                Ok(Response::from_parts(parts, body))
             }
             Ok(Err(e)) => {
                 // Record error type from ProxyError
@@ -317,17 +337,18 @@ impl BufferedForwarder {
     ///
     /// # Returns
     ///
-    /// The buffered (and possibly modified) body bytes.
+    /// The buffered (and possibly modified) body bytes and optional trailers.
     ///
     /// # Traceability
     /// - Implements: REQ-CORE-002 F-001 (Safe Buffering)
     /// - Implements: REQ-CORE-002 F-004 (Chain Semantics)
+    /// - Implements: REQ-CORE-002 F-005 (Trailer Preservation)
     async fn buffer_and_inspect_body(
         &self,
         body: Incoming,
         ctx: InspectionContext<'_>,
         is_request: bool,
-    ) -> ProxyResult<Bytes> {
+    ) -> ProxyResult<(Bytes, Option<HeaderMap>)> {
         let limit = if is_request {
             self.config.req_buffer_max
         } else {
@@ -337,10 +358,10 @@ impl BufferedForwarder {
         // 1. Buffer body with size limit (F-001)
         let limited_body = Limited::new(body, limit);
         let collected = limited_body.collect().await.map_err(|e| {
-            // Check if this is a size limit error
-            let err_msg = e.to_string();
-            if err_msg.contains("length limit exceeded") || err_msg.contains("body limit") {
+            // Type-safe check for size limit error
+            if e.downcast_ref::<LengthLimitError>().is_some() {
                 warn!(limit = limit, "Payload exceeded buffer limit");
+                // Both args are identical because Limited doesn't expose the actual size
                 ProxyError::PayloadTooLarge(limit, limit)
             } else {
                 error!(error = %e, "Failed to buffer body");
@@ -348,23 +369,24 @@ impl BufferedForwarder {
             }
         })?;
 
+        // Preserve trailers per REQ-CORE-002 F-005 (extract before consuming collected)
+        let trailers = collected.trailers().cloned();
         let original_bytes = collected.to_bytes();
 
         // 2. Handle empty body case (F-005)
         // Still run inspectors with empty slice per spec
         if original_bytes.is_empty() {
             debug!("Empty body, running inspectors with empty slice");
-            return self
-                .run_inspector_chain(&[], ctx)
-                .await
-                .map(|opt| opt.unwrap_or_else(|| original_bytes.clone()));
+            let result = self.run_inspector_chain(&[], ctx).await?;
+            let final_bytes = result.unwrap_or_else(|| original_bytes.clone());
+            return Ok((final_bytes, trailers));
         }
 
         // 3. Run inspector chain (F-004)
         let result = self.run_inspector_chain(&original_bytes, ctx).await?;
 
-        // 4. Return original or modified bytes
-        Ok(result.unwrap_or(original_bytes))
+        // 4. Return original or modified bytes, plus trailers
+        Ok((result.unwrap_or(original_bytes), trailers))
     }
 
     /// Run the inspector chain on a payload.
@@ -824,6 +846,48 @@ mod tests {
         // Run with empty body
         let result = forwarder.run_inspector_chain(b"", ctx).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_trailer_preservation_helper() {
+        use http_body_util::BodyExt;
+
+        // Test the helper function that creates bodies with trailers
+        let data = Bytes::from("test data");
+        let mut trailers = HeaderMap::new();
+        trailers.insert("x-trailer-1", "value1".parse().unwrap());
+        trailers.insert("x-trailer-2", "value2".parse().unwrap());
+
+        // Create body with trailers
+        let body = body_with_optional_trailers(data.clone(), Some(trailers.clone()));
+
+        // Collect and verify (extract trailers before consuming with to_bytes)
+        let collected = body.collect().await.unwrap();
+        let collected_trailers = collected.trailers().cloned();
+        let collected_data = collected.to_bytes();
+
+        assert_eq!(collected_data, data);
+        assert!(collected_trailers.is_some());
+        let collected_trailers = collected_trailers.unwrap();
+        assert_eq!(collected_trailers.get("x-trailer-1").unwrap(), "value1");
+        assert_eq!(collected_trailers.get("x-trailer-2").unwrap(), "value2");
+    }
+
+    #[tokio::test]
+    async fn test_body_without_trailers() {
+        use http_body_util::BodyExt;
+
+        // Test the helper function without trailers
+        let data = Bytes::from("test data");
+        let body = body_with_optional_trailers(data.clone(), None);
+
+        // Collect and verify (extract trailers before consuming with to_bytes)
+        let collected = body.collect().await.unwrap();
+        let collected_trailers = collected.trailers().cloned();
+        let collected_data = collected.to_bytes();
+
+        assert_eq!(collected_data, data);
+        assert!(collected_trailers.is_none());
     }
 
     /// Test inspector that panics
