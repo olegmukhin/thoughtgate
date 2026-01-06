@@ -208,12 +208,75 @@ fn configure_socket(socket: &Socket) -> Result<()> {
 
 ## 6. Definition of Done
 
-* [ ] `ProxyBody` wrapper implemented complying with `http_body::Body`.
-* [ ] `TCP_NODELAY` & `SO_KEEPALIVE` configured via `socket2`.
-* [ ] Concurrency limit (Semaphore) enforced and tested (`EC-008`).
-* [ ] Upgrade/WebSocket handling verified (`EC-004`).
-* [ ] Backpressure verified (`EC-005`).
-* [ ] All Timeouts (Read/Write/Total) verified.
-* [ ] Prometheus metrics (including Histograms) and OTel spans hooked up.
+* [x] `ProxyBody` wrapper implemented complying with `http_body::Body`.
+* [x] `TCP_NODELAY` & `SO_KEEPALIVE` configured via `socket2`.
+* [x] Concurrency limit (Semaphore) enforced and tested (`EC-008`).
+* [~] **Upgrade/WebSocket handling (`EC-004`): PARTIAL** - Detection and header preservation implemented. Full bidirectional relay deferred (see Section 7).
+* [x] Backpressure verified (`EC-005`).
+* [~] **Timeout Handling (`F-005`): PARTIAL** - `TimeoutBody` wrapper implemented but not applied to Green Path. See Section 7.
+* [x] Prometheus metrics (including Histograms) and OTel spans hooked up.
 * [ ] **Memory Leak Test:** Valgrind/ASAN shows zero leaks after 10k streams.
 * [ ] Performance benchmarks passed (TTFB < 2ms, Memory O(1)).
+
+## 7. Known Limitations
+
+### F-004: Protocol Upgrade Handling
+
+**Status**: PARTIAL IMPLEMENTATION
+
+### F-005: Timeout Handling on Green Path
+
+**Status**: PARTIAL IMPLEMENTATION
+
+**What Works**:
+- Upgrade requests are detected via `is_upgrade_request()`
+- Upgrade-related headers (`Connection`, `Upgrade`) are preserved
+- 101 Switching Protocols responses are logged
+- `serve_connection_with_upgrades` is enabled in `main.rs`
+
+**What's Missing**:
+- Explicit use of `hyper::upgrade::on()` to extract raw IO
+- Manual `tokio::io::copy_bidirectional()` for the relay
+- Full "opaque TCP pipe" semantics per specification
+
+**Why**:
+The current architecture uses `hyper_util::client::legacy::Client` which abstracts away the underlying connection. Implementing explicit upgrade handling requires:
+1. Custom connection pooling that exposes raw `TcpStream`
+2. Manual coordination of upgrade handshakes on both sides
+3. Refactoring the request/response lifecycle to accommodate detached IO
+
+**Impact**:
+For most practical purposes (WebSocket, HTTP/2 upgrades), hyper's internal handling is sufficient. The gap is primarily in strict conformance to the "opaque TCP pipe" requirement and explicit control over the bidirectional relay.
+
+**Remediation Path**:
+1. Replace `Client` API with manual `http1::handshake()` and connection pooling
+2. Implement upgrade coordinator that uses `hyper::upgrade::on()` on both sides
+3. Add integration test that verifies actual bidirectional data flow (not just header detection)
+
+**What Works**:
+- `TimeoutBody` wrapper exists and correctly implements per-chunk and total stream timeouts
+- `ProxyBody` wrapper exists for metrics and cancellation
+- Configuration values are loaded from environment variables
+
+**What's Missing**:
+- `TimeoutBody` and `ProxyBody` are not applied to Green Path response bodies
+- Response bodies are returned as `Incoming` without timeout protection
+- Per-chunk read timeouts are not enforced on streaming responses
+
+**Why**:
+Applying the wrappers would change the return type from `Response<Incoming>` to `Response<ProxyBody<TimeoutBody<Incoming>>>`. This requires:
+1. Type erasure via `BoxBody` (adds allocation overhead, contradicts zero-copy goal)
+2. Changes to `Service` trait implementation
+3. Updates to all call sites in `main.rs`
+
+**Impact**:
+The Green Path is vulnerable to slow-read attacks where an upstream server sends chunks with arbitrary delays. Without per-chunk timeouts, a malicious or misbehaving upstream can hold connections open indefinitely.
+
+**Note**: The Amber Path (BufferedForwarder) is protected via `tokio::time::timeout` wrapping the entire buffering operation.
+
+**Remediation Path**:
+1. Change `handle_request` return type to use `BoxBody` for type erasure
+2. Apply `TimeoutBody` wrapper with `stream_read_timeout` and `stream_total_timeout`
+3. Apply `ProxyBody` wrapper for metrics and cancellation token
+4. Update `Service` trait implementation to handle boxed bodies
+5. Add integration test that verifies timeout enforcement on slow responses

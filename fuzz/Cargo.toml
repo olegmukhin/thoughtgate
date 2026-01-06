@@ -10,11 +10,14 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1.3", features = ["derive"] }
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 http = "1"
+http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
 bytes = "1"
+async-trait = "0.1"
 
 [dependencies.thoughtgate]
 path = ".."
@@ -42,6 +45,27 @@ doc = false
 [[bin]]
 name = "fuzz_full_request"
 path = "fuzz_targets/fuzz_full_request.rs"
+test = false
+doc = false
+
+# REQ-CORE-002: Amber Path fuzzing
+[[bin]]
+name = "fuzz_amber_path"
+path = "fuzz_targets/fuzz_amber_path.rs"
+test = false
+doc = false
+
+# REQ-CORE-001: Green Path fuzzing
+[[bin]]
+name = "fuzz_green_path"
+path = "fuzz_targets/fuzz_green_path.rs"
+test = false
+doc = false
+
+# REQ-CORE-002: Inspector chain fuzzing
+[[bin]]
+name = "fuzz_inspector_chain"
+path = "fuzz_targets/fuzz_inspector_chain.rs"
 test = false
 doc = false
 

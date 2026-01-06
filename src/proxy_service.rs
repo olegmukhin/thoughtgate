@@ -195,13 +195,65 @@ impl ProxyService {
             .await
             .map_err(map_hyper_error)?;
 
+        // TODO(REQ-CORE-001 F-005): KNOWN LIMITATION - Timeout Wrapping
+        //
+        // Current State: TimeoutBody and ProxyBody wrappers exist but are not applied
+        // to the Green Path response bodies.
+        //
+        // Why: The current architecture returns `Response<Incoming>` directly from the
+        // client. Wrapping the body would change the return type to
+        // `Response<ProxyBody<TimeoutBody<Incoming>>>`, which would require:
+        // 1. Type erasure via BoxBody (adds allocation overhead)
+        // 2. Changes to Service trait implementation
+        // 3. Updates to all call sites in main.rs
+        //
+        // Impact: The proxy is vulnerable to slow-read attacks on the Green Path.
+        // Chunks can be delayed indefinitely without triggering timeouts.
+        //
+        // Remediation Path:
+        // 1. Change return type to use BoxBody for type erasure
+        // 2. Apply TimeoutBody wrapper with config from ProxyConfig
+        // 3. Apply ProxyBody wrapper for metrics and cancellation
+        // 4. Update Service trait and main.rs to handle boxed bodies
+        //
+        // Note: The Amber Path (BufferedForwarder) already has timeout protection
+        // via tokio::time::timeout wrapping the entire buffering operation.
+
         // Log if upgrade was successful (REQ-CORE-001 F-004)
         if is_upgrade && is_upgrade_response(&upstream_res) {
             info!(
                 status = %upstream_res.status(),
                 upgrade_protocol = ?upgrade_protocol,
-                "Protocol upgrade successful - switching to bidirectional relay"
+                "Protocol upgrade successful - relying on hyper's internal handling"
             );
+
+            // TODO(REQ-CORE-001 F-004): KNOWN LIMITATION - Upgrade Handling
+            //
+            // Current State: We detect upgrades and preserve necessary headers, but rely on
+            // hyper's internal upgrade handling rather than explicitly using hyper::upgrade::on()
+            // and tokio::io::copy_bidirectional().
+            //
+            // Why: The current architecture uses hyper_util::client::legacy::Client which abstracts
+            // away the underlying connection. To properly implement "opaque TCP pipe" semantics per
+            // REQ-CORE-001 F-004, we would need to:
+            //
+            // 1. Use hyper::upgrade::on() on both client request and upstream response
+            // 2. Extract the underlying IO from both connections
+            // 3. Use tokio::io::copy_bidirectional() for the relay
+            //
+            // This requires architectural changes:
+            // - Replace Client API with manual connection pooling
+            // - Track raw TcpStreams for both client and upstream
+            // - Implement custom upgrade detection and handshake coordination
+            //
+            // Impact: For most upgrade scenarios (WebSocket, HTTP/2), hyper's internal handling
+            // is sufficient. However, for strict "opaque TCP pipe" semantics and full control
+            // over the bidirectional relay, explicit handling is preferred.
+            //
+            // Next Steps:
+            // - Implement custom connection pool that exposes raw IO
+            // - Add explicit upgrade handler in handle_connection()
+            // - Add integration test that verifies bidirectional data flow
         }
 
         Ok(upstream_res)
