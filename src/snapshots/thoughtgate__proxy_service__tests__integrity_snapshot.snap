@@ -5,6 +5,7 @@ expression: snapshot_data
 {
   "forwarded_headers": {
     "authorization": "Bearer secret-token",
+    "connection": "keep-alive",
     "content-type": "application/json",
     "host": "localhost:3000",
     "transfer-encoding": "chunked",

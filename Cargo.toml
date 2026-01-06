@@ -13,6 +13,7 @@ tokio = { version = "1", features = ["full"] }
 # HTTP stack (Hyper v1)
 hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
 hyper-util = { version = "0.1", features = ["full"] }
+http-body = "1"
 http-body-util = "0.1"
 http = "1"
 bytes = "1"
@@ -24,6 +25,12 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 
 # Stream utilities for zero-copy streaming
 futures-util = "0.3"
+
+# Socket configuration (REQ-CORE-001 Section 3.2)
+socket2 = { version = "0.5", features = ["all"] }
+
+# Cancellation and utilities (REQ-CORE-001 F-002)
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # Middleware stack
 tower = "0.5"
@@ -39,11 +46,20 @@ clap = { version = "4", features = ["derive", "env"] }
 # Error handling
 thiserror = "2"
 
+# Async trait support (REQ-CORE-002 Inspector interface)
+async-trait = "0.1"
+
 # Memory allocator (reduces fragmentation under load)
 mimalloc = "0.1"
 
-# Mock server framework (only needed for mock_llm test binary)
-# Marked as optional to avoid including in main thoughtgate binary
+# OpenTelemetry + Prometheus (REQ-CORE-001 NFR-001)
+opentelemetry = { version = "0.22", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.22", features = ["rt-tokio"] }
+opentelemetry-prometheus = "0.15"
+prometheus = "0.13"
+once_cell = "1.19"
+
+# Mock server framework and metrics endpoint
 axum = { version = "0.8", optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
@@ -54,9 +70,10 @@ path = "src/bin/mock_llm.rs"
 required-features = ["mock"]
 
 [features]
-default = []
+default = ["metrics"]
 mock = ["axum", "serde", "serde_json"]
 fuzzing = []
+metrics = ["axum", "serde", "serde_json"]
 
 [dev-dependencies]
 # Kubernetes orchestration
