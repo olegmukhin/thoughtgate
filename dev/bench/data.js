@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1767696336446,
+  "lastUpdate": 1767997037182,
   "repoUrl": "https://github.com/olegmukhin/thoughtgate",
   "entries": {
     "Benchmark": [
@@ -169,6 +169,40 @@ window.BENCHMARK_DATA = {
           {
             "name": "ttfb/proxied/with_relay",
             "value": 11351371.344444443,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "oleg.v.mukhin@gmail.com",
+            "name": "Oleg Mukhin",
+            "username": "olegmukhin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "957055731c178f0f2e68f22d544be13edf7e11cf",
+          "message": "Merge pull request #13 from olegmukhin/traffic-termination\n\nfeat: implement zero-copy peeking and buffered termination strategies",
+          "timestamp": "2026-01-09T22:13:22Z",
+          "tree_id": "35ce71f4f8856a7d07f44fb0d6b804d101786595",
+          "url": "https://github.com/olegmukhin/thoughtgate/commit/957055731c178f0f2e68f22d544be13edf7e11cf"
+        },
+        "date": 1767997036336,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ttfb/direct/baseline",
+            "value": 131415.99600925605,
+            "unit": "ns"
+          },
+          {
+            "name": "ttfb/proxied/with_relay",
+            "value": 11448396.460000003,
             "unit": "ns"
           }
         ]
