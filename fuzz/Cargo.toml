@@ -68,4 +68,3 @@ name = "fuzz_inspector_chain"
 path = "fuzz_targets/fuzz_inspector_chain.rs"
 test = false
 doc = false
-

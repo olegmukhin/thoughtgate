@@ -1,0 +1,171 @@
+# ThoughtGate
+
+Human-in-the-loop approval proxy for MCP (Model Context Protocol) agents.
+
+## Specs
+
+All requirements are in `specs/`:
+- `ARCHITECTURE.md` - System overview
+- `RFC-001_Traffic_Model_Architecture.md` - Four-path routing design
+- `REQ-CORE-*` - Core mechanics (transport, streaming, errors, lifecycle)
+- `REQ-POL-*` - Policy engine (Cedar)
+- `REQ-GOV-*` - Governance (tasks, approvals, Slack)
+
+**Read the relevant REQ file before implementing any feature.**
+
+## Project Structure
+
+```
+src/
+├── error/        # REQ-CORE-004: Error types
+├── transport/    # REQ-CORE-003: MCP JSON-RPC, routing, upstream
+├── policy/       # REQ-POL-001: Cedar policy engine
+├── streaming/    # REQ-CORE-001: Zero-copy Green Path
+├── inspection/   # REQ-CORE-002, 006: Amber Path, inspectors
+├── governance/   # REQ-GOV-001/002/003: Tasks, pipeline, Slack
+└── lifecycle/    # REQ-CORE-005: Startup, shutdown, health
+```
+
+## Domain Model
+
+Traffic flows through exactly ONE path:
+
+| Path | Trigger | Behavior |
+|------|---------|----------|
+| **Green** | `PolicyDecision::Green` | Zero-copy streaming |
+| **Amber** | `PolicyDecision::Amber` | Buffer & inspect |
+| **Red** | `PolicyDecision::Red` | Reject immediately |
+| **Approval** | `PolicyDecision::Approval` | Slack workflow, block until approved |
+
+### v0.1 Constraints
+- **Blocking approval mode** - Hold HTTP connection until approval (no SEP-1686 tasks)
+- **Zombie prevention** - Check connection liveness before executing approved tools
+- **Single upstream** - One `THOUGHTGATE_UPSTREAM` per instance
+- **In-memory state** - Tasks lost on restart
+
+## Code Standards
+
+### Safety Rules (ENFORCED)
+```rust
+// ❌ NEVER in runtime code
+.unwrap()
+.expect("...")
+std::thread::sleep()
+std::sync::Mutex
+
+// ❌ NEVER log
+Authorization, Cookie, x-api-key, THOUGHTGATE_SLACK_BOT_TOKEN, tool_arguments
+
+// ✅ ALWAYS use
+? operator or explicit error handling
+tokio::time::sleep()
+tokio::sync::Mutex
+```
+
+### Requirement Traceability
+Every public function must link to its requirement:
+```rust
+/// Parses JSON-RPC 2.0 requests.
+///
+/// Implements: REQ-CORE-003/F-001
+/// Handles: REQ-CORE-003/EC-MCP-001, EC-MCP-004
+pub fn parse_jsonrpc(bytes: &[u8]) -> Result<JsonRpcMessage, ParseError>
+```
+
+### Key Types (must be consistent across codebase)
+```rust
+pub enum PolicyDecision { Green, Amber, Red, Approval }
+pub enum TaskStatus { Working, InputRequired, Executing, Completed, Failed, Rejected, Cancelled, Expired }
+pub enum ApprovalDecision { Approved, Rejected { reason: Option<String> } }
+```
+
+## Dependencies (Blessed Stack)
+
+| Category | Crates |
+|----------|--------|
+| Runtime | `tokio` (full) |
+| HTTP | `hyper` 1.x, `hyper-util`, `axum` 0.7, `tower`, `reqwest` |
+| Data | `bytes`, `serde`, `serde_json` |
+| Policy | `cedar-policy`, `arc-swap` |
+| Errors | `thiserror` (lib), `anyhow` (bin) |
+| Observability | `tracing`, `tracing-subscriber`, `metrics` |
+| Testing | `tokio-test`, `proptest`, `mockall`, `wiremock` |
+
+## Commands
+
+```bash
+cargo build                    # Build
+cargo test                     # Run tests
+cargo clippy -- -D warnings    # Lint
+cargo fuzz run fuzz_jsonrpc    # Fuzz JSON-RPC parser
+```
+
+## Implementation Order
+
+1. `REQ-CORE-004` - Error types (everything depends on this)
+2. `REQ-POL-001` - Cedar policy engine
+3. `REQ-CORE-003` - MCP transport & routing
+4. `REQ-CORE-001` - Green path streaming
+5. `REQ-CORE-002` - Amber path buffering
+6. `REQ-CORE-006` - Inspector framework
+7. `REQ-GOV-001` - Task lifecycle
+8. `REQ-GOV-003` - Slack integration
+9. `REQ-GOV-002` - Execution pipeline
+10. `REQ-CORE-005` - Lifecycle management
+
+## Quick Reference
+
+### Error Codes
+```
+-32700  ParseError           -32003  PolicyDenied
+-32600  InvalidRequest       -32007  ApprovalRejected
+-32601  MethodNotFound       -32008  ApprovalTimeout
+-32602  InvalidParams        -32009  RateLimited
+-32603  InternalError        -32010  InspectionFailed
+-32000  UpstreamConnFailed   -32013  ServiceUnavailable
+-32001  UpstreamTimeout
+-32002  UpstreamError
+```
+
+### Environment Variables
+```bash
+THOUGHTGATE_UPSTREAM=http://mcp-server:3000  # Required
+THOUGHTGATE_LISTEN=0.0.0.0:8080
+THOUGHTGATE_CEDAR_POLICY_PATH=/etc/thoughtgate/policy.cedar
+THOUGHTGATE_SLACK_BOT_TOKEN=xoxb-...
+THOUGHTGATE_SLACK_CHANNEL=#approvals
+THOUGHTGATE_APPROVAL_TIMEOUT_SECS=300
+```
+
+## Requirement-Specific Notes
+
+### REQ-CORE-001 (Green Path)
+```rust
+// FORBIDDEN - defeats zero-copy:
+body.clone()
+Vec::<u8>::extend_from_slice()
+String::from_utf8()
+
+// REQUIRED:
+Bytes (move semantics)
+http_body::Frame forwarding
+```
+
+### REQ-CORE-003 (JSON-RPC)
+```rust
+// Preserve exact ID type - never coerce
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum JsonRpcId {
+    Number(i64),
+    String(String),
+    Null,  // Notification, no response
+}
+```
+
+### REQ-GOV-003 (Slack)
+```rust
+// CRITICAL: Use batch polling
+// ❌ reactions.get per task (O(n) API calls)
+// ✅ conversations.history once (O(1) API calls)
+```
