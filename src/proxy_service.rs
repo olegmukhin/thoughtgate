@@ -3,6 +3,7 @@
 //! # Traceability
 //! - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy)
 
+use crate::config::ProxyConfig;
 use crate::error::{ProxyError, ProxyResult};
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -13,6 +14,9 @@ use hyper::{Request, Response};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
+use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
+use std::net::SocketAddr;
+use std::time::Duration;
 use tower::Service;
 use tracing::{error, info};
 
@@ -33,6 +37,8 @@ pub struct ProxyService {
     client: Client<HttpsConnector<HttpConnector>, ClientBody>,
     /// Optional fixed upstream URL for reverse proxy mode
     upstream_url: Option<String>,
+    /// Runtime configuration
+    config: ProxyConfig,
 }
 
 impl Clone for ProxyService {
@@ -40,6 +46,7 @@ impl Clone for ProxyService {
         Self {
             client: self.client.clone(),
             upstream_url: self.upstream_url.clone(),
+            config: self.config.clone(),
         }
     }
 }
@@ -53,13 +60,27 @@ impl ProxyService {
     /// - TLS crypto provider installation fails
     /// - Native TLS root certificates cannot be loaded
     pub fn new_with_upstream(upstream_url: Option<String>) -> ProxyResult<Self> {
+        Self::new_with_config(upstream_url, ProxyConfig::from_env())
+    }
+
+    /// Create a new proxy service with explicit configuration.
+    ///
+    /// # Traceability
+    /// - Implements: REQ-CORE-001 Section 3.2 (Network Optimization)
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProxyError::Connection` if:
+    /// - TLS crypto provider installation fails
+    /// - Native TLS root certificates cannot be loaded
+    pub fn new_with_config(upstream_url: Option<String>, config: ProxyConfig) -> ProxyResult<Self> {
         // Install default crypto provider for rustls (required for TLS to work)
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         // Create HTTP connector with TCP_NODELAY enabled for upstream connections
         // Implements: REQ-CORE-001 F-001 (Latency - TCP_NODELAY on both legs)
         let mut http_connector = HttpConnector::new();
-        http_connector.set_nodelay(true);
+        http_connector.set_nodelay(config.tcp_nodelay);
 
         // Build HTTPS connector with native OS certificate store
         let https_connector = HttpsConnectorBuilder::new()
@@ -82,24 +103,50 @@ impl ProxyService {
         Ok(Self {
             client,
             upstream_url,
+            config,
         })
+    }
+
+    /// Get a reference to the proxy configuration.
+    pub fn config(&self) -> &ProxyConfig {
+        &self.config
     }
 
     /// Handle an incoming HTTP request with zero-copy streaming.
     ///
     /// # Traceability
-    /// - Implements: REQ-CORE-001 F-002 (Zero-Copy using bytes::Bytes and BodyStream)
+    /// - Implements: REQ-CORE-001 F-001 (Zero-Copy using bytes::Bytes and BodyStream)
+    /// - Implements: REQ-CORE-001 F-002 (Fail-Fast Error Propagation)
     /// - Implements: REQ-CORE-001 F-003 (Transparency - preserve Content-Length/Transfer-Encoding)
+    /// - Implements: REQ-CORE-001 F-004 (Protocol Upgrade Handling)
     pub async fn handle_request(&self, req: Request<Incoming>) -> ProxyResult<Response<Incoming>> {
         // Extract target URI from request
         let target_uri = self.extract_target_uri(&req)?;
 
-        info!(
-            method = %req.method(),
-            uri = %req.uri(),
-            target = %target_uri,
-            "Proxying request"
-        );
+        // Check for protocol upgrade (REQ-CORE-001 F-004)
+        let is_upgrade = is_upgrade_request(&req);
+        let upgrade_protocol = if is_upgrade {
+            get_upgrade_protocol(&req)
+        } else {
+            None
+        };
+
+        if is_upgrade {
+            info!(
+                method = %req.method(),
+                uri = %req.uri(),
+                target = %target_uri,
+                upgrade_protocol = ?upgrade_protocol,
+                "Proxying upgrade request"
+            );
+        } else {
+            info!(
+                method = %req.method(),
+                uri = %req.uri(),
+                target = %target_uri,
+                "Proxying request"
+            );
+        }
 
         // Split request into parts and body
         let (parts, incoming_body) = req.into_parts();
@@ -141,10 +188,73 @@ impl ProxyService {
         })?;
 
         // Send request and stream response (zero-copy, no buffering)
-        let upstream_res = self.client.request(upstream_req).await.map_err(|e| {
-            error!(error = %e, "Upstream client error");
-            ProxyError::Connection(format!("Client error: {}", e))
-        })?;
+        // Map hyper errors to appropriate ProxyError variants (REQ-CORE-001 F-002)
+        let upstream_res = self
+            .client
+            .request(upstream_req)
+            .await
+            .map_err(map_hyper_error)?;
+
+        // TODO(REQ-CORE-001 F-005): KNOWN LIMITATION - Timeout Wrapping
+        //
+        // Current State: TimeoutBody and ProxyBody wrappers exist but are not applied
+        // to the Green Path response bodies.
+        //
+        // Why: The current architecture returns `Response<Incoming>` directly from the
+        // client. Wrapping the body would change the return type to
+        // `Response<ProxyBody<TimeoutBody<Incoming>>>`, which would require:
+        // 1. Type erasure via BoxBody (adds allocation overhead)
+        // 2. Changes to Service trait implementation
+        // 3. Updates to all call sites in main.rs
+        //
+        // Impact: The proxy is vulnerable to slow-read attacks on the Green Path.
+        // Chunks can be delayed indefinitely without triggering timeouts.
+        //
+        // Remediation Path:
+        // 1. Change return type to use BoxBody for type erasure
+        // 2. Apply TimeoutBody wrapper with config from ProxyConfig
+        // 3. Apply ProxyBody wrapper for metrics and cancellation
+        // 4. Update Service trait and main.rs to handle boxed bodies
+        //
+        // Note: The Amber Path (BufferedForwarder) already has timeout protection
+        // via tokio::time::timeout wrapping the entire buffering operation.
+
+        // Log if upgrade was successful (REQ-CORE-001 F-004)
+        if is_upgrade && is_upgrade_response(&upstream_res) {
+            info!(
+                status = %upstream_res.status(),
+                upgrade_protocol = ?upgrade_protocol,
+                "Protocol upgrade successful - relying on hyper's internal handling"
+            );
+
+            // TODO(REQ-CORE-001 F-004): KNOWN LIMITATION - Upgrade Handling
+            //
+            // Current State: We detect upgrades and preserve necessary headers, but rely on
+            // hyper's internal upgrade handling rather than explicitly using hyper::upgrade::on()
+            // and tokio::io::copy_bidirectional().
+            //
+            // Why: The current architecture uses hyper_util::client::legacy::Client which abstracts
+            // away the underlying connection. To properly implement "opaque TCP pipe" semantics per
+            // REQ-CORE-001 F-004, we would need to:
+            //
+            // 1. Use hyper::upgrade::on() on both client request and upstream response
+            // 2. Extract the underlying IO from both connections
+            // 3. Use tokio::io::copy_bidirectional() for the relay
+            //
+            // This requires architectural changes:
+            // - Replace Client API with manual connection pooling
+            // - Track raw TcpStreams for both client and upstream
+            // - Implement custom upgrade detection and handshake coordination
+            //
+            // Impact: For most upgrade scenarios (WebSocket, HTTP/2), hyper's internal handling
+            // is sufficient. However, for strict "opaque TCP pipe" semantics and full control
+            // over the bidirectional relay, explicit handling is preferred.
+            //
+            // Next Steps:
+            // - Implement custom connection pool that exposes raw IO
+            // - Add explicit upgrade handler in handle_connection()
+            // - Add integration test that verifies bidirectional data flow
+        }
 
         Ok(upstream_res)
     }
@@ -232,12 +342,13 @@ impl Service<Request<Incoming>> for ProxyService {
 
 /// Check if a header is a hop-by-hop header that shouldn't be forwarded.
 ///
-/// Note: `transfer-encoding` is NOT filtered per REQ-CORE-001 F-003.
+/// Note: `transfer-encoding` and `upgrade` are NOT filtered per REQ-CORE-001 F-003 and F-004.
 /// As a transparent streaming proxy, we must preserve chunked encoding information.
-/// Only connection management headers are filtered.
+/// Upgrade headers are preserved to enable WebSocket and HTTP/2 upgrades.
 ///
 /// # Traceability
 /// - Implements: REQ-CORE-001 F-003 (Transparency - preserve Transfer-Encoding)
+/// - Implements: REQ-CORE-001 F-004 (Protocol Upgrade Handling)
 #[cfg(feature = "fuzzing")]
 pub fn is_hop_by_hop_header(name: &str) -> bool {
     is_hop_by_hop_header_impl(name)
@@ -251,14 +362,41 @@ fn is_hop_by_hop_header(name: &str) -> bool {
 fn is_hop_by_hop_header_impl(name: &str) -> bool {
     matches!(
         name.to_lowercase().as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailers"
-            | "upgrade" // NOTE: "transfer-encoding" intentionally NOT filtered for transparent streaming
+        "keep-alive" | "proxy-authenticate" | "proxy-authorization" | "te" | "trailers" // NOTE: "connection", "upgrade", and "transfer-encoding" intentionally NOT filtered
+                                                                                        // to support WebSocket upgrades (F-004) and transparent streaming (F-003)
     )
+}
+
+/// Check if a request is attempting a protocol upgrade.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 F-004 (Protocol Upgrade Handling)
+pub fn is_upgrade_request<B>(req: &Request<B>) -> bool {
+    req.headers()
+        .get("connection")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_lowercase().contains("upgrade"))
+        .unwrap_or(false)
+        && req.headers().contains_key("upgrade")
+}
+
+/// Get the upgrade protocol from request headers.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 F-004 (Protocol Upgrade Handling)
+pub fn get_upgrade_protocol<B>(req: &Request<B>) -> Option<String> {
+    req.headers()
+        .get("upgrade")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_lowercase())
+}
+
+/// Check if a response indicates a successful protocol upgrade.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 F-004 (Protocol Upgrade Handling)
+pub fn is_upgrade_response<B>(res: &Response<B>) -> bool {
+    res.status() == hyper::StatusCode::SWITCHING_PROTOCOLS
 }
 
 /// Extract host from URI.
@@ -283,6 +421,102 @@ fn extract_port(uri: &Uri) -> ProxyResult<u16> {
             )),
         }
     }
+}
+
+/// Configure socket with optimized options for zero-copy streaming.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 Section 3.2 (Network Optimization)
+///
+/// # Socket Options
+/// - TCP_NODELAY: Disable Nagle's algorithm for low-latency
+/// - SO_KEEPALIVE: Keep connections alive during idle periods
+/// - SO_RCVBUF / SO_SNDBUF: Set buffer sizes for throughput
+pub fn configure_socket(socket: &Socket, config: &ProxyConfig) -> ProxyResult<()> {
+    // Set TCP_NODELAY (disable Nagle's algorithm)
+    socket
+        .set_nodelay(config.tcp_nodelay)
+        .map_err(|e| ProxyError::Connection(format!("Failed to set TCP_NODELAY: {}", e)))?;
+
+    // Set TCP keepalive
+    let keepalive = TcpKeepalive::new().with_time(Duration::from_secs(config.tcp_keepalive_secs));
+    socket
+        .set_tcp_keepalive(&keepalive)
+        .map_err(|e| ProxyError::Connection(format!("Failed to set SO_KEEPALIVE: {}", e)))?;
+
+    // Set socket buffer sizes
+    socket
+        .set_recv_buffer_size(config.socket_buffer_size)
+        .map_err(|e| ProxyError::Connection(format!("Failed to set SO_RCVBUF: {}", e)))?;
+
+    socket
+        .set_send_buffer_size(config.socket_buffer_size)
+        .map_err(|e| ProxyError::Connection(format!("Failed to set SO_SNDBUF: {}", e)))?;
+
+    Ok(())
+}
+
+/// Create a configured TCP socket for the given address.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 Section 3.2 (Network Optimization)
+pub fn create_configured_socket(addr: &SocketAddr, config: &ProxyConfig) -> ProxyResult<Socket> {
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
+        .map_err(|e| ProxyError::Connection(format!("Failed to create socket: {}", e)))?;
+
+    configure_socket(&socket, config)?;
+
+    Ok(socket)
+}
+
+/// Map hyper_util client errors to appropriate ProxyError variants.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 F-002 (Fail-Fast Error Propagation)
+///
+/// # Error Mapping
+/// - Connection refused -> `ProxyError::ConnectionRefused` (502)
+/// - Timeout -> `ProxyError::Timeout` (504)
+/// - Other errors -> `ProxyError::Connection` (502)
+fn map_hyper_error(e: hyper_util::client::legacy::Error) -> ProxyError {
+    use tracing::warn;
+
+    let error_msg = e.to_string().to_lowercase();
+
+    // Check for connection refused
+    if error_msg.contains("connection refused") {
+        warn!(error = %e, "Upstream connection refused");
+        return ProxyError::ConnectionRefused(format!("Upstream refused connection: {}", e));
+    }
+
+    // Check for timeout
+    if error_msg.contains("timeout") || error_msg.contains("timed out") {
+        warn!(error = %e, "Upstream timeout");
+        return ProxyError::Timeout(format!("Upstream timeout: {}", e));
+    }
+
+    // Check for connection errors
+    if error_msg.contains("connection") || error_msg.contains("connect") {
+        warn!(error = %e, "Upstream connection failed");
+        return ProxyError::Connection(format!("Failed to connect to upstream: {}", e));
+    }
+
+    // Check for client disconnection
+    if error_msg.contains("closed") || error_msg.contains("canceled") || error_msg.contains("reset")
+    {
+        warn!(error = %e, "Client disconnected");
+        return ProxyError::ClientDisconnect;
+    }
+
+    // Default to generic connection error
+    warn!(error = %e, "Upstream error");
+    ProxyError::Connection(format!("Upstream error: {}", e))
 }
 
 #[cfg(test)]
@@ -357,14 +591,14 @@ mod tests {
     ///
     /// # Traceability
     /// - Implements: REQ-CORE-001 F-003 (Transparency - Transfer-Encoding NOT filtered)
+    /// - Implements: REQ-CORE-001 F-004 (Protocol Upgrade - Upgrade headers NOT filtered)
     #[test]
     fn test_hop_by_hop_headers() {
         // These ARE hop-by-hop and should be filtered
-        assert!(is_hop_by_hop_header("connection"));
-        assert!(is_hop_by_hop_header("Connection"));
         assert!(is_hop_by_hop_header("keep-alive"));
+        assert!(is_hop_by_hop_header("Keep-Alive"));
         assert!(is_hop_by_hop_header("proxy-authorization"));
-        assert!(is_hop_by_hop_header("upgrade"));
+        assert!(is_hop_by_hop_header("Proxy-Authorization"));
 
         // These are NOT hop-by-hop and should NOT be filtered
         assert!(!is_hop_by_hop_header("content-type"));
@@ -374,6 +608,13 @@ mod tests {
         // CRITICAL: transfer-encoding must NOT be filtered (REQ-CORE-001 F-003)
         assert!(!is_hop_by_hop_header("transfer-encoding"));
         assert!(!is_hop_by_hop_header("Transfer-Encoding"));
+
+        // CRITICAL: connection and upgrade must NOT be filtered (REQ-CORE-001 F-004)
+        // These are needed for WebSocket and HTTP/2 upgrades
+        assert!(!is_hop_by_hop_header("connection"));
+        assert!(!is_hop_by_hop_header("Connection"));
+        assert!(!is_hop_by_hop_header("upgrade"));
+        assert!(!is_hop_by_hop_header("Upgrade"));
     }
 
     /// Snapshot test: Verify request transformation logic
@@ -395,8 +636,9 @@ mod tests {
             .header("authorization", "Bearer secret-token")
             .header("user-agent", "test-client/1.0")
             .header("x-custom-header", "custom-value")
-            .header("connection", "keep-alive") // Should be filtered
-            .header("transfer-encoding", "chunked") // Should be filtered
+            .header("connection", "keep-alive") // NOT filtered (F-004 upgrade support)
+            .header("transfer-encoding", "chunked") // NOT filtered (F-003 transparency)
+            .header("keep-alive", "timeout=60") // Should be filtered
             .body(())
             .unwrap();
 

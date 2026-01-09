@@ -132,6 +132,9 @@ jobs:
           - fuzz_uri_parsing
           - fuzz_header_redaction
           - fuzz_full_request
+          - fuzz_amber_path       # REQ-CORE-002
+          - fuzz_green_path       # REQ-CORE-001
+          - fuzz_inspector_chain  # REQ-CORE-002 F-004
     
     steps:
       - name: Checkout code
@@ -193,7 +196,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: quick-checks
     permissions:
-      contents: write  # Needed to push benchmark results to gh-pages
+      contents: write       # Needed to push benchmark results to gh-pages
+      pull-requests: write  # Needed to post PR comments with benchmark comparisons
     
     steps:
       - name: Checkout code

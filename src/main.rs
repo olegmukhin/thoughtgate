@@ -13,6 +13,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::Parser;
+use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
@@ -21,11 +22,12 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use thoughtgate::config::ProxyConfig;
 use thoughtgate::error::ProxyError;
 use thoughtgate::logging_layer::LoggingLayer;
 use thoughtgate::proxy_service::ProxyService;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore};
 use tokio::time::sleep;
 use tower::ServiceBuilder;
 use tracing::{error, info, warn};
@@ -64,6 +66,25 @@ struct ConnectionTracker {
     active_connections: Arc<AtomicUsize>,
 }
 
+/// RAII guard that automatically decrements the connection counter when dropped.
+///
+/// This ensures the counter is decremented even if the task panics, preventing
+/// the graceful shutdown logic from waiting indefinitely for crashed connections.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 (Connection Management Safety)
+struct ConnectionGuard {
+    tracker: ConnectionTracker,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.tracker
+            .active_connections
+            .fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl ConnectionTracker {
     fn new() -> Self {
         Self {
@@ -71,12 +92,15 @@ impl ConnectionTracker {
         }
     }
 
-    fn increment(&self) {
+    /// Increment the connection counter and return an RAII guard.
+    ///
+    /// The guard will automatically decrement the counter when dropped,
+    /// even if the task panics.
+    fn track_connection(&self) -> ConnectionGuard {
         self.active_connections.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn decrement(&self) {
-        self.active_connections.fetch_sub(1, Ordering::SeqCst);
+        ConnectionGuard {
+            tracker: self.clone(),
+        }
     }
 
     fn count(&self) -> usize {
@@ -95,20 +119,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let config = Config::parse();
-    let addr = format!("{}:{}", config.bind, config.port);
+    let cli_config = Config::parse();
+    let proxy_config = ProxyConfig::from_env();
+
+    // Initialize OpenTelemetry metrics (REQ-CORE-001 NFR-001)
+    #[cfg(feature = "metrics")]
+    {
+        use opentelemetry::global;
+        use opentelemetry_sdk::metrics::SdkMeterProvider;
+        use thoughtgate::metrics;
+
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(prometheus::default_registry().clone())
+            .build()?;
+
+        let provider = SdkMeterProvider::builder().with_reader(exporter).build();
+        global::set_meter_provider(provider.clone());
+
+        let meter = global::meter("thoughtgate");
+        metrics::init_metrics(&meter);
+
+        // Spawn metrics endpoint server
+        let metrics_port = proxy_config.metrics_port;
+        tokio::spawn(async move {
+            if let Err(e) = serve_metrics(metrics_port).await {
+                error!(error = %e, "Metrics server error");
+            }
+        });
+
+        info!(metrics_port = metrics_port, "Metrics endpoint started");
+    }
+
+    let addr = format!("{}:{}", cli_config.bind, cli_config.port);
     let listener = TcpListener::bind(&addr).await?;
 
     info!(
-        bind = %config.bind,
-        port = config.port,
-        shutdown_timeout = config.shutdown_timeout,
+        bind = %cli_config.bind,
+        port = cli_config.port,
+        shutdown_timeout = cli_config.shutdown_timeout,
         addr = %addr,
+        tcp_nodelay = proxy_config.tcp_nodelay,
+        tcp_keepalive_secs = proxy_config.tcp_keepalive_secs,
+        max_concurrent_streams = proxy_config.max_concurrent_streams,
+        socket_buffer_size = proxy_config.socket_buffer_size,
         "ThoughtGate Proxy starting"
     );
 
-    let proxy_service = Arc::new(ProxyService::new_with_upstream(
-        config.upstream_url.clone(),
+    let proxy_service = Arc::new(ProxyService::new_with_config(
+        cli_config.upstream_url.clone(),
+        proxy_config.clone(),
     )?);
     let service_stack = ServiceBuilder::new()
         .layer(LoggingLayer)
@@ -118,6 +177,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown_tx_clone = shutdown_tx.clone();
     let connection_tracker = ConnectionTracker::new();
     let tracker_clone = connection_tracker.clone();
+    let config_clone = proxy_config.clone();
+
+    // Semaphore for concurrency limiting (REQ-CORE-001 Section 3.2)
+    let semaphore = Arc::new(Semaphore::new(proxy_config.max_concurrent_streams));
 
     tokio::spawn(async move {
         match tokio::signal::ctrl_c().await {
@@ -155,17 +218,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             result = listener.accept() => {
                 match result {
                     Ok((stream, peer_addr)) => {
-                        // Disable Nagle's algorithm for low-latency streaming
-                        // Implements: REQ-CORE-001 F-001 (TCP_NODELAY enforcement)
-                        if let Err(e) = stream.set_nodelay(true) {
-                            error!(error = %e, "Failed to set TCP_NODELAY");
+                        // Try to acquire semaphore permit (REQ-CORE-001 Section 3.2)
+                        let permit = match semaphore.clone().try_acquire_owned() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                // Semaphore exhausted - return 503 immediately
+                                warn!(
+                                    peer = %peer_addr,
+                                    max_streams = proxy_config.max_concurrent_streams,
+                                    "Rejected connection: max concurrent streams reached"
+                                );
+                                tokio::spawn(async move {
+                                    let _ = send_503_response(stream).await;
+                                });
+                                continue;
+                            }
+                        };
+
+                        // Configure socket with optimized options
+                        // Implements: REQ-CORE-001 Section 3.2 (Network Optimization)
+                        if let Err(e) = configure_tcp_stream(&stream, &config_clone) {
+                            error!(error = %e, "Failed to configure socket");
                         }
 
                         let service_stack = service_stack.clone();
                         let mut conn_shutdown_rx = shutdown_tx.subscribe();
                         let tracker = connection_tracker.clone();
 
-                        tracker.increment();
+                        // RAII guard ensures decrement is called even if the task panics
+                        let conn_guard = tracker.track_connection();
 
                         tokio::spawn(async move {
                             if let Err(e) = handle_connection(
@@ -179,7 +260,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 error!(error = %e, "Connection handling error");
                             }
 
-                            tracker.decrement();
+                            // Explicit drops for clarity (both happen automatically at scope end)
+                            drop(conn_guard); // Decrements connection counter
+                            drop(permit); // Release semaphore permit
                         });
                     }
                     Err(e) => {
@@ -197,11 +280,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(
         active_connections = tracker_clone.count(),
-        timeout_seconds = config.shutdown_timeout,
+        timeout_seconds = cli_config.shutdown_timeout,
         "Waiting for active connections to drain"
     );
 
-    let shutdown_deadline = Duration::from_secs(config.shutdown_timeout);
+    let shutdown_deadline = Duration::from_secs(cli_config.shutdown_timeout);
     let start = std::time::Instant::now();
 
     while tracker_clone.count() > 0 {
@@ -283,10 +366,25 @@ where
     let svc_fn = hyper::service::service_fn(move |req| {
         let mut svc = service.clone();
         async move {
-            svc.call(req).await.map_err(|e| {
-                error!(error = %e, "Service error");
-                format!("{}", e)
-            })
+            // Convert ProxyError to proper HTTP response with correct status codes
+            // Implements: REQ-CORE-001 F-002 (Fail-Fast Error Propagation)
+            // Implements: REQ-CORE-002 F-002 (Fail-Closed State)
+            let result: Result<_, std::convert::Infallible> = match svc.call(req).await {
+                Ok(response) => {
+                    // Box the successful response body
+                    Ok(response.map(|body| body.boxed()))
+                }
+                Err(e) => {
+                    error!(error = %e, "Service error");
+                    // Use to_response() to map error to proper HTTP status code
+                    // Map Infallible error type to hyper::Error to match Incoming body
+                    Ok(e.to_response().map(|body| {
+                        body.map_err(|never: std::convert::Infallible| match never {})
+                            .boxed()
+                    }))
+                }
+            };
+            result
         }
     });
 
@@ -310,4 +408,181 @@ where
     }
 
     Ok(())
+}
+
+/// Configure a TcpStream with optimized socket options.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 Section 3.2 (Network Optimization)
+fn configure_tcp_stream(stream: &TcpStream, config: &ProxyConfig) -> std::io::Result<()> {
+    // Set TCP_NODELAY
+    stream.set_nodelay(config.tcp_nodelay)?;
+
+    // Convert to socket2::Socket for advanced options
+    let socket = socket2::SockRef::from(stream);
+
+    // Set TCP keepalive
+    let keepalive =
+        socket2::TcpKeepalive::new().with_time(Duration::from_secs(config.tcp_keepalive_secs));
+    socket.set_tcp_keepalive(&keepalive)?;
+
+    // Set socket buffer sizes
+    socket.set_recv_buffer_size(config.socket_buffer_size)?;
+    socket.set_send_buffer_size(config.socket_buffer_size)?;
+
+    Ok(())
+}
+
+/// Send a 503 Service Unavailable response when semaphore is exhausted.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 Section 3.2 (Concurrency Limit)
+async fn send_503_response(mut stream: TcpStream) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let body = "503 Service Unavailable\n\n\
+                ThoughtGate has reached its maximum concurrent stream limit.\n\
+                Please retry your request in a moment.";
+    let content_length = body.len();
+    let response = format!(
+        "HTTP/1.1 503 Service Unavailable\r\n\
+         Content-Type: text/plain\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         Retry-After: 1\r\n\
+         \r\n\
+         {}",
+        content_length, body
+    );
+
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// Serve Prometheus metrics endpoint.
+///
+/// # Traceability
+/// - Implements: REQ-CORE-001 NFR-001 (Observability - Metrics Endpoint)
+#[cfg(feature = "metrics")]
+async fn serve_metrics(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    use axum::{response::IntoResponse, routing::get, Router};
+
+    async fn metrics_handler() -> impl IntoResponse {
+        use prometheus::{Encoder, TextEncoder};
+
+        let metrics = prometheus::default_registry().gather();
+        let encoder = TextEncoder::new();
+        let mut buffer = Vec::new();
+        if let Err(e) = encoder.encode(&metrics, &mut buffer) {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to encode metrics: {}", e),
+            )
+                .into_response();
+        }
+        (
+            axum::http::StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            buffer,
+        )
+            .into_response()
+    }
+
+    let app = Router::new().route("/metrics", get(metrics_handler));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    info!(addr = %addr, "Metrics server listening");
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_guard_increments_and_decrements() {
+        let tracker = ConnectionTracker::new();
+        assert_eq!(tracker.count(), 0);
+
+        {
+            let _guard = tracker.track_connection();
+            assert_eq!(tracker.count(), 1);
+        }
+
+        // Guard dropped, counter should be back to 0
+        assert_eq!(tracker.count(), 0);
+    }
+
+    #[test]
+    fn test_connection_guard_multiple() {
+        let tracker = ConnectionTracker::new();
+        assert_eq!(tracker.count(), 0);
+
+        let _guard1 = tracker.track_connection();
+        assert_eq!(tracker.count(), 1);
+
+        let _guard2 = tracker.track_connection();
+        assert_eq!(tracker.count(), 2);
+
+        let _guard3 = tracker.track_connection();
+        assert_eq!(tracker.count(), 3);
+
+        drop(_guard1);
+        assert_eq!(tracker.count(), 2);
+
+        drop(_guard2);
+        assert_eq!(tracker.count(), 1);
+
+        drop(_guard3);
+        assert_eq!(tracker.count(), 0);
+    }
+
+    #[test]
+    fn test_connection_guard_panic_safety() {
+        let tracker = ConnectionTracker::new();
+        assert_eq!(tracker.count(), 0);
+
+        // Simulate a panic in a spawned task
+        let result = std::panic::catch_unwind(|| {
+            let _guard = tracker.track_connection();
+            assert_eq!(tracker.count(), 1);
+            panic!("Simulated panic in connection handler");
+        });
+
+        assert!(result.is_err());
+
+        // Even after panic, counter should be decremented
+        assert_eq!(tracker.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_connection_guard_async_panic_safety() {
+        let tracker = ConnectionTracker::new();
+        assert_eq!(tracker.count(), 0);
+
+        // Simulate what happens in the actual code: spawn a task that panics
+        let tracker_clone = tracker.clone();
+        let handle = tokio::spawn(async move {
+            let _guard = tracker_clone.track_connection();
+            // Simulate some async work
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            panic!("Simulated async panic");
+        });
+
+        // Wait for the task to complete (it will panic)
+        let result = handle.await;
+        assert!(result.is_err());
+
+        // Counter should be back to 0 even after panic
+        assert_eq!(tracker.count(), 0);
+    }
 }

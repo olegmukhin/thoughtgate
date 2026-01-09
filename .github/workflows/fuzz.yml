@@ -29,6 +29,9 @@ jobs:
           - fuzz_uri_parsing
           - fuzz_header_redaction
           - fuzz_full_request
+          - fuzz_amber_path       # REQ-CORE-002
+          - fuzz_green_path       # REQ-CORE-001
+          - fuzz_inspector_chain  # REQ-CORE-002 F-004
     
     steps:
       - name: Checkout code
@@ -82,12 +85,13 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fuzz-crashes-${{ matrix.target }}-${{ github.run_id }}
           path: fuzz/artifacts/${{ matrix.target }}/
           if-no-files-found: ignore
           retention-days: 30
+          include-hidden-files: true
 
       - name: Fail if crashes found
         if: failure()
