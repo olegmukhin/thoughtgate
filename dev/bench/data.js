@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1768084699581,
+  "lastUpdate": 1768088400655,
   "repoUrl": "https://github.com/olegmukhin/thoughtgate",
   "entries": {
     "Benchmark": [
@@ -237,6 +237,40 @@ window.BENCHMARK_DATA = {
           {
             "name": "ttfb/proxied/with_relay",
             "value": 11375513.813333333,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "oleg.v.mukhin@gmail.com",
+            "name": "Oleg Mukhin",
+            "username": "olegmukhin"
+          },
+          "committer": {
+            "email": "oleg.v.mukhin@gmail.com",
+            "name": "Oleg Mukhin",
+            "username": "olegmukhin"
+          },
+          "distinct": true,
+          "id": "03b772f4a63227300d10232f3458c6ac4a4df43f",
+          "message": "docs: merge pre-commit checklist",
+          "timestamp": "2026-01-10T23:31:53Z",
+          "tree_id": "6545ed3c245930dbb4b5724b3418a76e2a07d72c",
+          "url": "https://github.com/olegmukhin/thoughtgate/commit/03b772f4a63227300d10232f3458c6ac4a4df43f"
+        },
+        "date": 1768088399866,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ttfb/direct/baseline",
+            "value": 141104.0656612643,
+            "unit": "ns"
+          },
+          {
+            "name": "ttfb/proxied/with_relay",
+            "value": 11354554.626666663,
             "unit": "ns"
           }
         ]
