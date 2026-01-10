@@ -1,3 +1,15 @@
+//! Kubernetes integration tests for ThoughtGate performance baseline.
+//!
+//! These tests are marked as `#[ignore]` by default because they require:
+//! - A running Kubernetes cluster (e.g., minikube, kind, or cloud provider)
+//! - kubectl configured and accessible
+//! - k6 installed for load testing
+//!
+//! To run these tests:
+//! ```bash
+//! cargo test --test integration_k8s -- --ignored
+//! ```
+
 use anyhow::{Context, Result, bail};
 use k8s_openapi::api::core::v1::{Namespace, Pod};
 use kube::{
@@ -480,6 +492,7 @@ impl Drop for TestContext {
 
 #[tokio::test]
 #[serial]
+#[ignore = "Requires Kubernetes cluster - run with: cargo test -- --ignored"]
 async fn test_performance_baseline() -> Result<()> {
     let ctx = TestContext::new().await?;
     let (ttfb, duration) = ctx.run_test().await?;
