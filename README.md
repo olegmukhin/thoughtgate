@@ -1,400 +1,279 @@
 # ThoughtGate
 
-[![CI/CD Pipeline](https://github.com/olegmukhin/thoughtgate/actions/workflows/ci.yml/badge.svg)](https://github.com/olegmukhin/thoughtgate/actions/workflows/ci.yml)
+**Human-in-the-loop approval workflows for MCP (Model Context Protocol) agents.**
 
-A high-performance, memory-safe sidecar proxy for governing MCP (Model Context Protocol) and A2A (Agent-to-Agent) agentic AI traffic. Built in Rust with zero-copy streaming, full HTTP/1.1 and HTTP/2 support, and production-ready observability.
-
-## Vision
-
-ThoughtGate complements gateway-level projects like [agentgateway](https://github.com/linuxfoundation/agentgateway) (Linux Foundation, Solo.io-donated) by providing **sidecar-level governance** for agentic workloads. While gateways handle ingress/egress at the network boundary, sidecars provide fine-grained control at the application level, enabling:
-
-- **Per-pod policy enforcement** (future: Cedar policy engine)
-- **Streaming-aware inspection** (future: struson-based JSON streaming)
-- **Low-latency request/response modification** without gateway round-trips
-- **SPIFFE-based identity** for mTLS and workload attestation (future)
-
-This project follows the architectural patterns of [Linkerd2-proxy](https://github.com/linkerd/linkerd2-proxy) — minimal footprint, high throughput, and composable Tower middleware.
-
-## Features
-
-### MVP (Current)
-
-- ✅ **Forward HTTP Proxy** - Configure via `HTTP_PROXY`/`HTTPS_PROXY` environment variables
-- ✅ **Full HTTP/1.1 Support** - Persistent connections, chunked encoding, hop-by-hop header handling
-- ✅ **CONNECT Method Tunneling** - Bidirectional streaming for HTTPS connections (preserves stateful flows)
-- ✅ **Zero-Copy Streaming** - Never buffers full bodies (critical for SSE, long-running tasks)
-- ✅ **Structured JSON Logging** - Request/response logging with timestamp, method, URI, status, latency
-- ✅ **Security-Aware Logging** - Automatically strips sensitive headers (Authorization, Cookies, API keys)
-- ✅ **Tower-Based Middleware** - Extensible stack (LoggingLayer now → future: Auth, RateLimit, Policy)
-
-### Future Work
-
-- **HTTP/2 Full Support** - Currently HTTP/2 client support, server-side coming
-- **Ambient Redirection** - iptables/nftables-based transparent proxying (no env var config needed)
-- **xDS Configuration** - Dynamic configuration via Envoy xDS APIs (like agentgateway)
-- **Streaming JSON Inspection** - [struson](https://github.com/qwerty250/st ruson)-based streaming JSON parsing for MCP/A2A protocol inspection
-- **Cedar Policy Engine** - Fine-grained authorization policies
-- **SPIFFE Integration** - Workload identity and mTLS
-- **Metrics & Tracing** - Prometheus metrics, OpenTelemetry tracing
-- **Request/Response Modification** - Header injection, body transformation
-
-## Architecture
+ThoughtGate is a sidecar proxy that intercepts MCP tool calls and routes them through policy-based approval workflows before execution. It ensures AI agents can't perform sensitive operations without human oversight.
 
 ```
-┌─────────────┐
-│   Client    │
-└──────┬──────┘
-       │ HTTP_PROXY=127.0.0.1:4141
-       ▼
-┌─────────────────────────────────┐
-│        ThoughtGate              │
-│  ┌───────────────────────────┐ │
-│  │  Tower Middleware Stack    │ │
-│  │  ┌─────────────────────┐   │ │
-│  │  │  LoggingLayer       │   │ │
-│  │  └──────────┬──────────┘   │ │
-│  │             │               │ │
-│  │  ┌──────────▼──────────┐   │ │
-│  │  │  ProxyService       │   │ │
-│  │  │  - HTTP forwarding  │   │ │
-│  │  │  - CONNECT tunnel   │   │ │
-│  │  └──────────┬──────────┘   │ │
-│  └─────────────┼───────────────┘ │
-└────────────────┼─────────────────┘
-                 │
-                 ▼
-         ┌───────────────┐
-         │   Upstream    │
-         │  (MCP/A2A)    │
-         └───────────────┘
+┌─────────────┐     ┌─────────────────────────────────────┐     ┌─────────────┐
+│  AI Agent   │────▶│           ThoughtGate               │────▶│  MCP Server │
+│  (Claude,   │◀────│  • Policy evaluation (Cedar)        │◀────│  (Tools)    │
+│   GPT, etc) │     │  • Approval workflows (Slack)       │     │             │
+└─────────────┘     │  • Request inspection               │     └─────────────┘
+                    └─────────────────────────────────────┘
 ```
 
-### Core Components
+## Why ThoughtGate?
 
-- **`main.rs`** - Entry point, connection handling, CONNECT detection
-- **`proxy_service.rs`** - Core proxy logic (HTTP forwarding, CONNECT tunneling)
-- **`logging_layer.rs`** - Tower layer for structured request/response logging
-- **`error.rs`** - Error types using `thiserror`
+AI agents are increasingly capable of taking real-world actions—deleting files, sending emails, making purchases, modifying databases. ThoughtGate provides a governance layer that:
 
-## Build & Run
+- **Enforces policies** — Define which tools require approval using Cedar policies
+- **Enables human oversight** — Route sensitive operations to Slack for approval
+- **Inspects requests** — Detect PII, validate schemas, apply transformations
+- **Maintains audit trails** — Log all tool calls and approval decisions
+
+## Features (v0.1 MVP)
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| MCP Proxy | ✅ | JSON-RPC 2.0 compliant proxy for MCP traffic |
+| Cedar Policies | ✅ | Flexible policy engine for routing decisions |
+| Four-Path Routing | ✅ | Green (stream), Amber (inspect), Red (deny), Approval (human) |
+| Slack Approvals | ✅ | Post approval requests, detect 👍/👎 reactions |
+| Request Inspection | ✅ | PII detection, schema validation |
+| Blocking Mode | ✅ | Hold connection until approval (v0.1) |
+
+### Roadmap
+
+| Feature | Version | Description |
+|---------|---------|-------------|
+| SEP-1686 Tasks | v0.2 | Async task-based approval flow |
+| Persistent State | v0.2 | Redis-backed task storage |
+| Multi-Upstream | v0.2 | Route to multiple MCP servers |
+| A2A Approval | v1.0 | Agent-to-agent approval workflows |
+| Prompt Guard | v1.0 | ML-based prompt injection detection |
+
+## Quick Start
 
 ### Prerequisites
 
-- Rust 1.70+ (edition 2021)
-- Cargo
+- Rust 1.75+
+- An MCP server to proxy
+- Slack workspace with bot token (for approvals)
 
-### Build
+### Installation
 
 ```bash
-# Debug build
-cargo build
-
-# Release build (optimized)
+# From source
+git clone https://github.com/thoughtgate/thoughtgate
+cd thoughtgate
 cargo build --release
+
+# Binary will be at target/release/thoughtgate
 ```
 
-### Run
+### Basic Usage
 
 ```bash
-# Default: listen on 127.0.0.1:4141
-cargo run
+# Start ThoughtGate proxying to an MCP server
+export THOUGHTGATE_UPSTREAM=http://localhost:3000
+export THOUGHTGATE_LISTEN=0.0.0.0:8080
 
-# Custom port via CLI
-cargo run -- --port 8080
-
-# Custom port via environment variable
-PROXY_PORT=8080 cargo run
-
-# Custom bind address and port
-cargo run -- --bind 0.0.0.0 --port 4141
+./thoughtgate
 ```
 
-### Configuration
+Point your MCP client at `http://localhost:8080` instead of the upstream server.
 
-- **Port**: `--port` flag or `PROXY_PORT` environment variable (default: `4141`)
-- **Bind Address**: `--bind` flag (default: `127.0.0.1`)
-- **Log Level**: `RUST_LOG` environment variable (default: `info`)
-
-## Usage Examples
-
-### 1. Basic HTTP Proxy
-
-Configure your client to use the proxy:
+### With Slack Approvals
 
 ```bash
-export HTTP_PROXY=http://127.0.0.1:4141
-export HTTPS_PROXY=http://127.0.0.1:4141
+export THOUGHTGATE_UPSTREAM=http://localhost:3000
+export THOUGHTGATE_SLACK_BOT_TOKEN=xoxb-your-token
+export THOUGHTGATE_SLACK_CHANNEL="#approvals"
+export THOUGHTGATE_CEDAR_POLICY_PATH=./policy.cedar
 
-# Test with curl
-curl -v http://example.com
+./thoughtgate
 ```
 
-The proxy will:
-1. Receive the request
-2. Extract target URI from the request
-3. Forward to upstream with proper headers
-4. Stream response back to client
-5. Log request/response with structured JSON
+## Architecture
 
-### 2. HTTPS Tunneling (CONNECT)
+ThoughtGate classifies all traffic into one of four paths:
 
-For HTTPS connections, the proxy automatically handles CONNECT:
-
-```bash
-export HTTPS_PROXY=http://127.0.0.1:4141
-
-# HTTPS request - proxy will tunnel
-curl -v https://example.com
+```
+                    ┌─────────────────────────────────────────────────────────┐
+                    │                    THOUGHTGATE                          │
+                    │                                                         │
+  MCP Request ─────▶│  ┌──────────┐    ┌─────────────────────────────────┐   │
+                    │  │  Cedar   │───▶│         PATH ROUTER             │   │
+                    │  │  Policy  │    │                                 │   │
+                    │  └──────────┘    │  Green ──▶ Stream directly      │   │
+                    │                  │  Amber ──▶ Buffer & inspect     │   │
+                    │                  │  Red ────▶ Reject immediately   │   │
+                    │                  │  Approval ▶ Slack workflow      │   │
+                    │                  └─────────────────────────────────┘   │
+                    │                                                         │
+                    └─────────────────────────────────────────────────────────┘
 ```
 
-The proxy will:
-1. Receive `CONNECT example.com:443 HTTP/1.1`
-2. Connect to upstream `example.com:443`
-3. Send `200 Connection Established` to client
-4. Bidirectionally copy bytes (zero-copy streaming)
-5. Log tunnel establishment and closure
+| Path | When | Behavior |
+|------|------|----------|
+| **Green** | Trusted traffic (e.g., `tools/list`) | Zero-copy streaming, minimal latency |
+| **Amber** | Needs inspection (e.g., responses with PII) | Buffer, run inspectors, then forward |
+| **Red** | Policy denied | Return error immediately |
+| **Approval** | Sensitive operations (e.g., `delete_user`) | Post to Slack, wait for 👍/👎 |
 
-### 3. Streaming SSE (Server-Sent Events)
+## Configuration
 
-For SSE streams, the proxy preserves streaming without buffering:
+### Environment Variables
 
-```bash
-export HTTP_PROXY=http://127.0.0.1:4141
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `THOUGHTGATE_UPSTREAM` | ✅ | — | Upstream MCP server URL |
+| `THOUGHTGATE_LISTEN` | | `0.0.0.0:8080` | Listen address |
+| `THOUGHTGATE_CEDAR_POLICY_PATH` | | (embedded) | Path to Cedar policy file |
+| `THOUGHTGATE_SLACK_BOT_TOKEN` | For approvals | — | Slack bot OAuth token |
+| `THOUGHTGATE_SLACK_CHANNEL` | For approvals | — | Channel for approval messages |
+| `THOUGHTGATE_APPROVAL_TIMEOUT_SECS` | | `300` | Max wait time for approval |
+| `THOUGHTGATE_REQUEST_TIMEOUT_SECS` | | `30` | Upstream request timeout |
 
-# SSE endpoint
-curl -N http://example.com/sse
+See [docs/configuration.md](docs/configuration.md) for the complete list.
+
+### Cedar Policy Example
+
+```cedar
+// Allow tools/list without restrictions
+permit(
+    principal,
+    action == Action::"tools/list",
+    resource
+);
+
+// Require approval for destructive operations
+permit(
+    principal,
+    action == Action::"tools/call",
+    resource
+) when {
+    resource.tool_name in ["delete_user", "drop_table", "send_email"]
+} advice {
+    "require_approval": true
+};
+
+// Deny access to admin tools for non-admin roles
+forbid(
+    principal,
+    action == Action::"tools/call",
+    resource
+) when {
+    resource.tool_name == "admin_console" &&
+    !principal in Role::"admin"
+};
 ```
 
-The proxy streams chunks as they arrive, maintaining low Time-To-First-Byte (TTFB).
+## Deployment
 
-### 4. MCP/A2A Protocol Traffic
+### Kubernetes Sidecar
 
-For agentic AI protocols (MCP, A2A), the proxy handles JSON-RPC and streaming responses:
-
-```bash
-export HTTP_PROXY=http://127.0.0.1:4141
-export HTTPS_PROXY=http://127.0.0.1:4141
-
-# Your MCP/A2A client will automatically use the proxy
-```
-
-## Logging
-
-Logs are emitted as structured JSON to stdout:
-
-```json
-{
-  "timestamp": "2024-01-15T10:30:45.123Z",
-  "level": "INFO",
-  "fields": {
-    "method": "GET",
-    "uri": "http://example.com/api",
-    "status": 200,
-    "latency_ms": 45,
-    "direction": "outbound",
-    "body_info": "1024 bytes"
-  },
-  "target": "thoughtgate",
-  "message": "Response sent"
-}
-```
-
-### Logged Fields
-
-- **Request**: `method`, `uri`, `version`, `headers` (sanitized), `direction: "inbound"`
-- **Response**: `method`, `uri`, `status`, `version`, `headers` (sanitized), `body_info`, `latency_ms`, `direction: "outbound"`
-- **CONNECT**: `authority`, `target`, `direction: "tunnel"`
-
-### Sensitive Headers (Auto-Redacted)
-
-The following headers are automatically redacted in logs:
-- `Authorization`
-- `Cookie`
-- `Set-Cookie`
-- `X-Api-Key`
-- `X-Auth-Token`
-- `Proxy-Authorization`
-
-## Testing
-
-### Automated CI/CD Testing
-
-Every push to `main` and all pull requests automatically run:
-- **Unit tests** - Core proxy logic and utilities
-- **Integration tests** - Streaming, peeking, and memory profiling
-- **Kubernetes tests** - End-to-end deployment testing with Kind cluster
-- **Benchmarks** - TTFB and throughput validation
-- **Linting** - Clippy with warnings as errors
-
-See the [CI/CD Pipeline](.github/workflows/ci.yml) for details.
-
-### Manual Testing
-
-1. **Start the proxy**:
-   ```bash
-   cargo run -- --port 4141
-   ```
-
-2. **Test HTTP**:
-   ```bash
-   export HTTP_PROXY=http://127.0.0.1:4141
-   curl -v http://httpbin.org/get
-   ```
-
-3. **Test HTTPS (CONNECT)**:
-   ```bash
-   export HTTPS_PROXY=http://127.0.0.1:4141
-   curl -v https://httpbin.org/get
-   ```
-
-4. **Test Streaming**:
-   ```bash
-   export HTTP_PROXY=http://127.0.0.1:4141
-   curl -N http://example.com/sse-endpoint
-   ```
-
-### Running Tests Locally
-
-```bash
-# Run all unit and integration tests (except K8s)
-cargo test
-
-# Run specific test suites
-cargo test --test integration_streaming
-cargo test --test unit_peeking
-cargo test --test memory_profile
-
-# Run benchmarks
-cargo bench --bench ttfb
-
-# Run linting
-cargo clippy -- -D warnings
-
-# Run Kubernetes integration tests (requires Kind cluster)
-just test-kind
-```
-
-## Performance Considerations
-
-- **Zero-Copy**: Uses `bytes::Bytes` for body chunks, never copies full bodies
-- **Backpressure**: Respects client/server backpressure via Tokio streams
-- **Connection Pooling**: Hyper client maintains persistent connections
-- **Memory Safety**: Rust's ownership system prevents common proxy vulnerabilities
-
-## Release Process
-
-ThoughtGate uses automated container image publishing to GitHub Container Registry (GHCR).
-
-### Creating a Release
-
-1. **Tag the release**:
-   ```bash
-   git tag -a v0.1.0 -m "Release v0.1.0: Initial release with zero-copy streaming"
-   git push origin v0.1.0
-   ```
-
-2. **Automated CI/CD pipeline**:
-   - Runs all tests (unit, integration, K8s)
-   - Builds multi-arch container images (amd64 and arm64)
-   - Publishes to `ghcr.io/olegmukhin/thoughtgate:v0.1.0`
-   - Updates `ghcr.io/olegmukhin/thoughtgate:latest`
-
-3. **Pull the released image**:
-   ```bash
-   # Pull specific version
-   docker pull ghcr.io/olegmukhin/thoughtgate:v0.1.0
-   
-   # Pull latest release
-   docker pull ghcr.io/olegmukhin/thoughtgate:latest
-   ```
-
-### Running the Container
-
-```bash
-# Run the proxy in a container
-docker run -p 4141:4141 ghcr.io/olegmukhin/thoughtgate:v0.1.0 \
-  --port 4141 \
-  --bind 0.0.0.0 \
-  --upstream-url http://your-upstream-service
-
-# Run with custom configuration
-docker run -e RUST_LOG=debug -e PROXY_PORT=8080 \
-  -p 8080:8080 \
-  ghcr.io/olegmukhin/thoughtgate:latest
-```
-
-### Deployment in Kubernetes
+ThoughtGate is designed to run as a sidecar container:
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: my-app
+  name: my-agent
 spec:
   containers:
-  - name: app
-    image: my-app:latest
-    env:
-    - name: HTTP_PROXY
-      value: "http://127.0.0.1:4141"
-    - name: HTTPS_PROXY
-      value: "http://127.0.0.1:4141"
-  
-  # ThoughtGate sidecar
-  - name: thoughtgate
-    image: ghcr.io/olegmukhin/thoughtgate:v0.1.0
-    args: ["--port", "4141", "--bind", "0.0.0.0", "--upstream-url", "http://backend"]
-    ports:
-    - containerPort: 4141
-    resources:
-      limits:
-        cpu: "200m"
-        memory: "64Mi"
-      requests:
-        cpu: "50m"
-        memory: "32Mi"
+    - name: agent
+      image: my-agent:latest
+      env:
+        - name: MCP_SERVER_URL
+          value: "http://localhost:8080"  # Points to ThoughtGate
+    
+    - name: thoughtgate
+      image: thoughtgate:v0.1
+      ports:
+        - containerPort: 8080
+      env:
+        - name: THOUGHTGATE_UPSTREAM
+          value: "http://mcp-server:3000"
+        - name: THOUGHTGATE_SLACK_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: thoughtgate-secrets
+              key: slack-token
 ```
 
-### Versioning Strategy
+### Docker
 
-ThoughtGate follows [Semantic Versioning](https://semver.org/):
-- **MAJOR** version: Incompatible API changes
-- **MINOR** version: New functionality (backwards compatible)
-- **PATCH** version: Bug fixes (backwards compatible)
+```bash
+docker run -d \
+  -p 8080:8080 \
+  -e THOUGHTGATE_UPSTREAM=http://host.docker.internal:3000 \
+  -e THOUGHTGATE_SLACK_BOT_TOKEN=xoxb-... \
+  -e THOUGHTGATE_SLACK_CHANNEL="#approvals" \
+  thoughtgate:v0.1
+```
 
-Container images are tagged with:
-- Full version: `v0.1.0`
-- Major.minor: `v0.1` (tracks latest patch)
-- Major: `v0` (tracks latest minor and patch)
-- `latest` (tracks latest release)
+## Slack Setup
 
-## Dependencies
+1. Create a Slack app at [api.slack.com/apps](https://api.slack.com/apps)
 
-- **tokio** - Async runtime
-- **hyper** (v1) - HTTP/1.1 and HTTP/2 client/server
-- **hyper-util** - Hyper utilities and adapters
-- **http-body-util** - Body combinators
-- **tower** - Middleware stack
-- **tracing** + **tracing-subscriber** - Structured logging
-- **clap** - CLI argument parsing
-- **thiserror** - Error handling
+2. Add Bot Token Scopes:
+   - `chat:write` — Post approval messages
+   - `reactions:read` — Detect approval reactions
+   - `channels:history` — Read channel messages for polling
 
-## Contributing
+3. Install to workspace and copy the Bot OAuth Token
 
-This project follows Rust best practices:
-- Use `clippy` with pedantic standards
-- Zero-copy where possible (`bytes::Bytes`)
-- Proper error handling (`thiserror` for internal, `anyhow` only in `main.rs`/tests)
-- Comprehensive comments for complex logic
+4. Invite the bot to your approvals channel: `/invite @ThoughtGate`
 
-## License
+### Approval Flow
 
-Apache-2.0 OR MIT
+When a tool call requires approval:
 
-## References
+1. ThoughtGate posts a message to Slack:
+   ```
+   🔔 Approval Required
+   
+   Tool: delete_user
+   Arguments: {"user_id": "12345"}
+   Requested by: agent-pod-abc
+   
+   React 👍 to approve or 👎 to reject
+   ```
 
-- [Linkerd2-proxy](https://github.com/linkerd/linkerd2-proxy) - Architectural inspiration
-- [agentgateway](https://github.com/linuxfoundation/agentgateway) - Gateway-level governance
-- [Hyper v1](https://hyper.rs/) - HTTP library
-- [Tower](https://github.com/tower-rs/tower) - Middleware stack
+2. A human reacts with 👍 or 👎
 
+3. ThoughtGate detects the reaction and either:
+   - **👍** Executes the tool, returns result to agent
+   - **👎** Returns `ApprovalRejected` error to agent
+
+## v0.1 Limitations
+
+| Limitation | Impact | Future |
+|------------|--------|--------|
+| **Blocking mode** | HTTP connection held during approval (may timeout) | v0.2: SEP-1686 async tasks |
+| **In-memory state** | Pending approvals lost on restart | v0.2: Redis persistence |
+| **Single upstream** | One MCP server per ThoughtGate instance | v0.2: Multi-upstream routing |
+| **Polling-based** | 5s delay to detect Slack reactions | v0.2: Slack Events API |
+
+## Observability
+
+### Prometheus Metrics
+
+```
+thoughtgate_requests_total{path="green|amber|red|approval"}
+thoughtgate_request_duration_seconds{path="..."}
+thoughtgate_approval_total{result="approved|rejected|timeout"}
+thoughtgate_upstream_requests_total{status="success|error|timeout"}
+thoughtgate_policy_evaluations_total{decision="green|amber|red|approval"}
+```
+
+### Health Endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | Liveness probe |
+| `GET /ready` | Readiness probe |
+| `GET /metrics` | Prometheus metrics |
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture overview |
+| [RFC-001](docs/rfcs/RFC-001_Traffic_Model_Architecture.md) | Traffic model design |
+| [REQ-CORE-*](specs/) | Core requirements (transport, streaming, errors) |
+| [REQ-POL-*](specs/) | Policy engine requirements |
+| [REQ-GOV-*](specs/) | Governance/approval requirements |
+| [IMPLEMENTATION_PLAYBOOK.md](docs/IMPLEMENTATION_PLAYBOOK.md) | Developer guide |
