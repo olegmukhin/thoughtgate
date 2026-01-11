@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::post,
@@ -128,6 +128,8 @@ pub struct McpServer {
 impl McpServer {
     /// Create a new MCP server.
     ///
+    /// Implements: REQ-CORE-003/§5.2 (MCP Streamable HTTP Transport)
+    ///
     /// # Arguments
     ///
     /// * `config` - Server configuration
@@ -153,6 +155,8 @@ impl McpServer {
     ///
     /// This is useful for testing with mock upstreams.
     ///
+    /// Implements: REQ-CORE-003/§5.2 (MCP Streamable HTTP Transport)
+    ///
     /// # Arguments
     ///
     /// * `config` - Server configuration
@@ -172,15 +176,21 @@ impl McpServer {
 
     /// Create the axum Router.
     ///
+    /// Implements: REQ-CORE-003/F-002 (Method Routing)
+    ///
     /// The router includes:
     /// - `POST /mcp/v1` - Main MCP endpoint
+    /// - Body size limit enforced at HTTP layer (before buffering)
     pub fn router(&self) -> Router {
         Router::new()
             .route("/mcp/v1", post(handle_mcp_request))
+            .layer(DefaultBodyLimit::max(self.state.max_body_size))
             .with_state(self.state.clone())
     }
 
     /// Run the server.
+    ///
+    /// Implements: REQ-CORE-003/§5.2 (MCP Streamable HTTP Transport)
     ///
     /// This blocks until the server is shut down.
     ///
@@ -678,8 +688,10 @@ mod tests {
             max_body_size: 10, // Very small limit
         });
 
+        // Router with DefaultBodyLimit layer - rejects oversized bodies at HTTP layer
         let router = Router::new()
             .route("/mcp/v1", post(handle_mcp_request))
+            .layer(DefaultBodyLimit::max(state.max_body_size))
             .with_state(state);
 
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"test"}"#; // Exceeds 10 bytes
@@ -691,11 +703,8 @@ mod tests {
             .expect("should build request");
 
         let response = router.oneshot(request).await.expect("should get response");
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = response_body(response).await;
-        assert!(body.contains("-32600")); // Invalid Request
-        assert!(body.contains("exceeds maximum size"));
+        // DefaultBodyLimit returns 413 Payload Too Large
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     /// Verifies: EC-MCP-013 (Integer ID preserved)

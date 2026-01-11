@@ -200,6 +200,8 @@ pub struct JsonRpcResponse {
 impl JsonRpcResponse {
     /// Create a success response.
     ///
+    /// Implements: REQ-CORE-003/§6.2 (Output: MCP Response)
+    ///
     /// # Arguments
     ///
     /// * `id` - The request ID to echo back
@@ -214,6 +216,8 @@ impl JsonRpcResponse {
     }
 
     /// Create an error response.
+    ///
+    /// Implements: REQ-CORE-003/§6.2 (Output: MCP Response)
     ///
     /// # Arguments
     ///
@@ -267,6 +271,8 @@ impl McpRequest {
     /// Returns true if this is a notification (no ID).
     ///
     /// Notifications do not receive responses per JSON-RPC 2.0.
+    ///
+    /// Implements: REQ-CORE-003/F-001.3 (Notification Detection)
     #[inline]
     pub fn is_notification(&self) -> bool {
         self.id.is_none()
@@ -276,12 +282,16 @@ impl McpRequest {
     ///
     /// Task-augmented requests may be handled differently by the
     /// governance layer.
+    ///
+    /// Implements: REQ-CORE-003/F-003 (SEP-1686 Detection)
     #[inline]
     pub fn is_task_augmented(&self) -> bool {
         self.task_metadata.is_some()
     }
 
     /// Convert to a JsonRpcRequest for forwarding to upstream.
+    ///
+    /// Implements: REQ-CORE-003/F-004 (Request Forwarding)
     pub fn to_jsonrpc_request(&self) -> JsonRpcRequest {
         JsonRpcRequest {
             jsonrpc: JSONRPC_VERSION.to_string(),
