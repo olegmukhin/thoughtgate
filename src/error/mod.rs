@@ -5,10 +5,20 @@
 //! This module defines all error types that can occur in ThoughtGate and provides
 //! JSON-RPC 2.0 compliant error response formatting.
 //!
+//! # v0.1 Error Model
+//!
+//! Policy actions map to errors as follows:
+//!
+//! | Action | Success | Error |
+//! |--------|---------|-------|
+//! | Forward | Upstream response | -32000/-32001/-32002 (Upstream errors) |
+//! | Approve | Upstream response | -32007 (Rejected), -32008 (Timeout) |
+//! | Reject | N/A | -32003 (PolicyDenied) |
+//!
 //! ## Module Organization
 //!
 //! - `jsonrpc` - JSON-RPC 2.0 error response structures (REQ-CORE-004)
-//! - `proxy` - HTTP proxy error types (REQ-CORE-001, REQ-CORE-002)
+//! - `proxy` - HTTP proxy error types (deferred: REQ-CORE-001, REQ-CORE-002)
 //! - `ThoughtGateError` - MCP/JSON-RPC error types (REQ-CORE-004)
 
 pub mod jsonrpc;
@@ -162,8 +172,11 @@ pub enum ThoughtGateError {
         timeout_secs: u64,
     },
 
-    // Pipeline errors (from REQ-GOV-002)
+    // Pipeline errors (from REQ-GOV-002) - v0.2+
     /// An inspector rejected the request.
+    ///
+    /// **Note:** Inspection is deferred to v0.2+. This error is retained for
+    /// future use when Amber Path inspection is enabled.
     ///
     /// Implements: REQ-CORE-004/EC-ERR-015
     #[error("Request validation failed: {reason}")]
@@ -176,6 +189,9 @@ pub enum ThoughtGateError {
 
     /// Policy changed between approval and execution.
     ///
+    /// **Note:** Policy drift detection is deferred to v0.2+. In v0.1 blocking mode,
+    /// approved requests are forwarded immediately without re-evaluation.
+    ///
     /// Implements: REQ-CORE-004/EC-ERR-016
     #[error("Policy changed. Request no longer permitted")]
     PolicyDrift {
@@ -184,6 +200,9 @@ pub enum ThoughtGateError {
     },
 
     /// Request context changed during approval.
+    ///
+    /// **Note:** Transform drift detection is deferred to v0.2+. In v0.1, requests
+    /// are not inspected or transformed.
     ///
     /// Implements: REQ-CORE-004/EC-ERR-017
     #[error("Request context changed during approval")]

@@ -1,11 +1,22 @@
 //! Inspector trait and related types for the Amber Path.
 //!
-//! This module defines the core inspection interface for buffered payload analysis.
+//! # v0.1 Status: DEFERRED
+//!
+//! This module is **deferred** to v0.2+. The inspector framework is implemented
+//! but not active in v0.1 since Amber Path (buffered inspection) is not used.
+//!
+//! The module defines the core inspection interface for buffered payload analysis.
 //! Inspectors can approve, modify (redact), or reject payloads based on policy.
 //!
+//! # When to Activate (v0.2+)
+//!
+//! - When PII detection/redaction is needed
+//! - When schema validation is required
+//! - When request/response transformation is needed
+//!
 //! # Traceability
-//! - Implements: REQ-CORE-002 F-003 (Async Inspector Interface)
-//! - Implements: REQ-CORE-002 F-004 (Chain Semantics)
+//! - Deferred: REQ-CORE-002 F-003 (Async Inspector Interface)
+//! - Deferred: REQ-CORE-002 F-004 (Chain Semantics)
 
 use async_trait::async_trait;
 use bytes::Bytes;

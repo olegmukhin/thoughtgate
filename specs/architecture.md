@@ -50,9 +50,8 @@ ThoughtGate is an **MCP (Model Context Protocol) sidecar proxy** that implements
 
 | Capability | Description | Requirement |
 |------------|-------------|-------------|
-| **Policy-Based Classification** | Cedar policies classify tool calls into Green/Amber/Approval/Red paths | REQ-POL-001 |
-| **Zero-Copy Streaming** | LLM token streams pass through without buffering | REQ-CORE-001 |
-| **Request Inspection** | Buffer and inspect/transform requests before forwarding | REQ-CORE-002 |
+| **Policy-Based Classification** | Cedar policies classify tool calls into Reject/Forward/Approve actions | REQ-POL-001 |
+| **Request Forwarding** | Forward approved requests to upstream, pass responses through | REQ-CORE-003 |
 | **Approval Workflows** | Human/agent approval via Slack (extensible to A2A, webhooks) | REQ-GOV-001/002/003 |
 | **SEP-1686 Tasks** | Async task semantics for long-running approvals | REQ-GOV-001 |
 
@@ -81,34 +80,33 @@ ThoughtGate is an **MCP (Model Context Protocol) sidecar proxy** that implements
 │  │   ┌─────────────┐    ┌─────────────┐    ┌─────────────────────────┐    │   │
 │  │   │   Policy    │    │   Schema    │    │      Evaluator          │    │   │
 │  │   │   Loader    │───▶│  Validator  │───▶│                         │    │   │
-│  │   │             │    │             │    │  StreamRaw? → Green     │    │   │
-│  │   └─────────────┘    └─────────────┘    │  Inspect?   → Amber     │    │   │
-│  │         ▲                               │  Approve?   → Approval      │    │   │
-│  │         │                               │  (none)     → Red       │    │   │
-│  │   ConfigMap/Env                         └──────────┬──────────────┘    │   │
+│  │   │             │    │             │    │  Forward? → Forward     │    │   │
+│  │   └─────────────┘    └─────────────┘    │  Approve? → Approve     │    │   │
+│  │         ▲                               │  (none)   → Reject      │    │   │
+│  │         │                               └──────────┬──────────────┘    │   │
+│  │   ConfigMap/Env                                    │                   │   │
 │  └─────────────────────────────────────────────────────┼───────────────────┘   │
 │                                                        │                       │
 │            ┌───────────────────────────────────────────┼───────────────────┐   │
 │            │                                           │                   │   │
 │            ▼                                           ▼                   ▼   │
 │  ┌─────────────────┐                      ┌─────────────────┐    ┌───────────┐│
-│  │  REQ-CORE-001   │                      │  REQ-CORE-002   │    │REQ-CORE-04││
-│  │   Green Path    │                      │   Amber Path    │    │  Red Path ││
+│  │     Forward     │                      │     Approve     │    │  Reject   ││
 │  │                 │                      │                 │    │           ││
-│  │  Zero-copy      │                      │  Buffer +       │    │  Return   ││
-│  │  streaming      │                      │  Inspect        │    │  Error    ││
-│  │                 │                      │                 │    │           ││
+│  │  Send request   │                      │  Block until    │    │  Return   ││
+│  │  to upstream,   │                      │  human approves │    │  Error    ││
+│  │  pass response  │                      │  then forward   │    │           ││
+│  │  back to agent  │                      │                 │    │           ││
 │  └────────┬────────┘                      └────────┬────────┘    └───────────┘│
 │           │                                        │                          │
-│           │                                        ▼                          │
-│           │                      ┌─────────────────────────────────────────┐  │
+│           │                      ┌─────────────────┴───────────────────────┐  │
 │           │                      │         REQ-GOV-001/002/003             │  │
-│           │                      │            Approval Path                    │  │
+│           │                      │            Approval Path                │  │
 │           │                      │                                         │  │
 │           │                      │  ┌───────────┐  ┌───────────────────┐  │  │
 │           │                      │  │   Task    │  │    Approval       │  │  │
 │           │                      │  │  Manager  │◀─│    Service        │  │  │
-│           │                      │  │ (SEP-1686)│  │  (Slack Webhook)  │  │  │
+│           │                      │  │ (SEP-1686)│  │  (Slack Polling)  │  │  │
 │           │                      │  └─────┬─────┘  └─────────┬─────────┘  │  │
 │           │                      │        │                  │            │  │
 │           │                      │        ▼                  │            │  │
@@ -138,11 +136,11 @@ ThoughtGate is an **MCP (Model Context Protocol) sidecar proxy** that implements
 
 ## 4. Request Lifecycle
 
-### 4.1 Complete Request Flow
+### 4.1 Complete Request Flow (v0.1 Simplified)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                           REQUEST LIFECYCLE                                     │
+│                           REQUEST LIFECYCLE (v0.1)                              │
 │                                                                                 │
 │   ┌─────┐                                                                       │
 │   │START│                                                                       │
@@ -171,36 +169,35 @@ ThoughtGate is an **MCP (Model Context Protocol) sidecar proxy** that implements
 │   ┌─────────────────────────────────────────────────────────────────────────┐  │
 │   │ 3. CLASSIFY (REQ-POL-001)                                               │  │
 │   │    • Build Cedar request (principal, resource, action)                  │  │
-│   │    • Evaluate policies in order: StreamRaw → Inspect → Approve          │  │
-│   │    • Return decision: Green / Amber / Approval / Red                        │  │
+│   │    • Evaluate policies: Forward → Approve                               │  │
+│   │    • Return decision: Forward / Approve / Reject                        │  │
 │   └───────────────────────────────────┬─────────────────────────────────────┘  │
 │                                       │                                        │
 │               ┌───────────────────────┼───────────────────────┐                │
 │               │                       │                       │                │
 │               ▼                       ▼                       ▼                │
 │   ┌───────────────────┐   ┌───────────────────┐   ┌───────────────────┐       │
-│   │ 4a. GREEN PATH    │   │ 4b. AMBER PATH    │   │ 4c. Approval PATH     │       │
-│   │ (REQ-CORE-001)    │   │ (REQ-CORE-002)    │   │ (REQ-GOV-*)       │       │
+│   │     FORWARD       │   │     APPROVE       │   │     REJECT        │       │
+│   │                   │   │  (REQ-GOV-*)      │   │  (REQ-CORE-004)   │       │
 │   │                   │   │                   │   │                   │       │
-│   │ • Stream response │   │ • Buffer request  │   │ • Pre-Approval  │       │
-│   │ • Zero-copy       │   │ • Run inspectors  │   │ • Create Task     │       │
-│   │ • No buffering    │   │ • Transform/PII   │   │ • Send Webhook    │       │
-│   │                   │   │ • Forward         │   │ • Wait for Human  │       │
-│   └─────────┬─────────┘   └─────────┬─────────┘   │ • On Approve:     │       │
-│             │                       │             │   - Re-eval policy│       │
-│             │                       │             │   - Post-Approval     │       │
-│             │                       │             │   - Forward       │       │
-│             │                       │             │ • Store Result    │       │
-│             │                       │             └─────────┬─────────┘       │
-│             │                       │                       │                  │
-│             └───────────────────────┼───────────────────────┘                  │
-│                                     │                                          │
-│                                     ▼                                          │
+│   │ • Send request    │   │ • Block request   │   │ • Return error    │       │
+│   │   to upstream     │   │ • Send to Slack   │   │ • -32003 Denied   │       │
+│   │ • Pass response   │   │ • Wait for human  │   │ • Log audit       │       │
+│   │   back to agent   │   │ • On Approve:     │   │                   │       │
+│   │                   │   │   Forward request │   │                   │       │
+│   │                   │   │ • On Reject:      │   │                   │       │
+│   │                   │   │   Return error    │   │                   │       │
+│   └─────────┬─────────┘   └─────────┬─────────┘   └───────────────────┘       │
+│             │                       │                                          │
+│             └───────────────────────┼──────────────────────────────────────┐   │
+│                                     │                                      │   │
+│                                     ▼                                      ▼   │
 │   ┌─────────────────────────────────────────────────────────────────────────┐  │
-│   │ 5. RESPOND (REQ-CORE-003)                                               │  │
-│   │    • Green/Amber: Return upstream response                              │  │
-│   │    • Approval: Return SEP-1686 task token (agent polls)                     │  │
-│   │    • Red: Return JSON-RPC error (REQ-CORE-004)                          │  │
+│   │ 4. RESPOND (REQ-CORE-003)                                               │  │
+│   │    • Forward: Return upstream response directly                         │  │
+│   │    • Approve (approved): Return upstream response                       │  │
+│   │    • Approve (rejected): Return -32007 ApprovalRejected                 │  │
+│   │    • Reject: Return -32003 PolicyDenied                                 │  │
 │   └───────────────────────────────────┬─────────────────────────────────────┘  │
 │                                       │                                        │
 │                                       ▼                                        │
@@ -208,154 +205,150 @@ ThoughtGate is an **MCP (Model Context Protocol) sidecar proxy** that implements
 │                                   │ END │                                      │
 │                                   └─────┘                                      │
 │                                                                                 │
-│   ┌─────────────────────────────────────────────────────────────────────────┐  │
-│   │ 4d. RED PATH (REQ-CORE-004)                                             │  │
-│   │    • Return JSON-RPC error                                              │  │
-│   │    • Error code: -32003 (Policy Denied)                                 │  │
-│   │    • Log audit event                                                    │  │
-│   └─────────────────────────────────────────────────────────────────────────┘  │
-│                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────┘
+
+Response handling is the same for all paths: pass it through.
+No response inspection or streaming distinction in v0.1.
 ```
 
-### 4.2 Approval Task Flow (Detailed)
+### 4.2 Approval Flow (v0.1 Blocking Mode)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                           Approval TASK LIFECYCLE                                   │
+│                     v0.1 BLOCKING APPROVAL FLOW                                 │
 │                                                                                 │
 │   Agent                    ThoughtGate                    Human (Slack)         │
 │     │                           │                              │                │
 │     │  tools/call               │                              │                │
-│     │  {task:{ttl:600000}}      │                              │                │
+│     │  {"name":"delete_user"}   │                              │                │
 │     │ ─────────────────────────▶│                              │                │
 │     │                           │                              │                │
-│     │                    ┌──────┴──────┐                       │                │
-│     │                    │ Pre-Approval    │                       │                │
-│     │                    │ Amber       │                       │                │
-│     │                    │ (inspect)   │                       │                │
-│     │                    └──────┬──────┘                       │                │
+│     │              ┌────────────┴────────────┐                 │                │
+│     │              │ Policy: Approve required │                 │                │
+│     │              │ Hold HTTP connection     │                 │                │
+│     │              └────────────┬────────────┘                 │                │
 │     │                           │                              │                │
-│     │                    ┌──────┴──────┐                       │                │
-│     │                    │ Create Task │                       │                │
-│     │                    │ (SEP-1686)  │                       │                │
-│     │                    └──────┬──────┘                       │                │
+│     │                           │    Slack Message             │                │
+│     │                           │ ────────────────────────────▶│                │
+│     │                           │    (approval request)        │                │
 │     │                           │                              │                │
-│     │  {taskId, status:working} │      Webhook                 │                │
-│     │ ◀─────────────────────────│─────────────────────────────▶│                │
-│     │                           │      (approval request)      │                │
+│     │         (HTTP connection held open)                      │                │
+│     │              ...          │         (human reviews)      │                │
+│     │                           │              ...             │                │
 │     │                           │                              │                │
-│     │  tasks/get                │                              │                │
-│     │ ─────────────────────────▶│                              │                │
+│     │                           │    Reaction/Button           │                │
+│     │                           │◀────────────────────────────│                │
+│     │                           │    (👍 approve / 👎 reject)  │                │
 │     │                           │                              │                │
-│     │  {status:input_required}  │                              │                │
+│     │              ┌────────────┴────────────┐                 │                │
+│     │              │ Check: Client connected? │                 │                │
+│     │              └────────────┬────────────┘                 │                │
+│     │                           │                              │                │
+│     │              ┌────────────┴────────────┐                 │                │
+│     │              │ On Approve:              │                 │                │
+│     │              │   Forward to Upstream    │                 │                │
+│     │              │   Return response        │                 │                │
+│     │              │ On Reject:               │                 │                │
+│     │              │   Return -32007 error    │                 │                │
+│     │              │ On Timeout:              │                 │                │
+│     │              │   Return -32008 error    │                 │                │
+│     │              └────────────┬────────────┘                 │                │
+│     │                           │                              │                │
+│     │  {"result": ...}          │                              │                │
 │     │ ◀─────────────────────────│                              │                │
-│     │                           │                              │                │
-│     │        (polling)          │         (human reviews)      │                │
-│     │          ...              │              ...             │                │
-│     │                           │                              │                │
-│     │                           │      Callback                │                │
-│     │                           │◀─────────────────────────────│                │
-│     │                           │      {decision: approved}    │                │
-│     │                           │                              │                │
-│     │                    ┌──────┴──────┐                       │                │
-│     │                    │ Re-evaluate │                       │                │
-│     │                    │ Policy      │                       │                │
-│     │                    └──────┬──────┘                       │                │
-│     │                           │                              │                │
-│     │                    ┌──────┴──────┐                       │                │
-│     │                    │ Post-Approval   │                       │                │
-│     │                    │ Amber       │                       │                │
-│     │                    └──────┬──────┘                       │                │
-│     │                           │                              │                │
-│     │                    ┌──────┴──────┐                       │                │
-│     │                    │ Forward to  │                       │                │
-│     │                    │ Upstream    │                       │                │
-│     │                    └──────┬──────┘                       │                │
-│     │                           │                              │                │
-│     │  tasks/result             │                              │                │
-│     │ ─────────────────────────▶│                              │                │
-│     │                           │                              │                │
-│     │  {result: ...}            │                              │                │
-│     │ ◀─────────────────────────│                              │                │
+│     │  (or error)               │                              │                │
 │     │                           │                              │                │
 │     ▼                           ▼                              ▼                │
 └─────────────────────────────────────────────────────────────────────────────────┘
+
+From client perspective: Slow tool call, but standard JSON-RPC response.
+No SEP-1686 task polling required in v0.1 blocking mode.
 ```
 
 ## 5. Component Integration Matrix
 
-### 5.1 Requirement Dependencies
+### 5.1 Requirement Dependencies (v0.1)
 
-| Requirement | Depends On | Provides To |
-|-------------|------------|-------------|
-| REQ-CORE-001 (Green Path) | — | REQ-CORE-003 |
-| REQ-CORE-002 (Amber Path) | — | REQ-CORE-003, REQ-GOV-002 |
-| REQ-CORE-003 (MCP Transport) | REQ-POL-001 | All paths |
-| REQ-CORE-004 (Error Handling) | — | All |
-| REQ-CORE-005 (Lifecycle) | — | All |
-| REQ-POL-001 (Cedar Policy) | — | REQ-CORE-003, REQ-GOV-002 |
-| REQ-GOV-001 (Task Lifecycle) | REQ-CORE-003 | REQ-GOV-002, REQ-GOV-003 |
-| REQ-GOV-002 (Execution Pipeline) | REQ-CORE-002, REQ-POL-001, REQ-GOV-001 | REQ-GOV-003 |
-| REQ-GOV-003 (Approval Integration) | REQ-GOV-001, REQ-GOV-002 | External systems |
+| Requirement | Depends On | Provides To | v0.1 Status |
+|-------------|------------|-------------|-------------|
+| REQ-CORE-001 (Zero-Copy Streaming) | — | REQ-CORE-003 | **Deferred** |
+| REQ-CORE-002 (Buffered Inspection) | — | REQ-CORE-003, REQ-GOV-002 | **Deferred** |
+| REQ-CORE-003 (MCP Transport) | REQ-POL-001 | All actions | Active |
+| REQ-CORE-004 (Error Handling) | — | All | Active |
+| REQ-CORE-005 (Lifecycle) | — | All | Active |
+| REQ-POL-001 (Cedar Policy) | — | REQ-CORE-003 | Active |
+| REQ-GOV-001 (Task Lifecycle) | REQ-CORE-003 | REQ-GOV-002, REQ-GOV-003 | Active (blocking mode) |
+| REQ-GOV-002 (Execution Pipeline) | REQ-POL-001, REQ-GOV-001 | REQ-GOV-003 | Active (simplified) |
+| REQ-GOV-003 (Approval Integration) | REQ-GOV-001, REQ-GOV-002 | External systems | Active |
 
-### 5.2 Data Flow Between Components
+**v0.1 Simplification:**
+- REQ-CORE-001 (Green Path) and REQ-CORE-002 (Amber Path) are **deferred** to a future version
+- In v0.1, all responses are passed through without inspection or streaming distinction
+- When response inspection or LLM streaming is needed, these requirements will be reintroduced
+
+### 5.2 Data Flow Between Components (v0.1)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                            DATA FLOW                                            │
+│                            DATA FLOW (v0.1)                                     │
 │                                                                                 │
-│   REQ-CORE-003         REQ-POL-001          REQ-CORE-001/002                   │
-│   ─────────────        ─────────────        ────────────────                   │
-│   McpRequest    ──────▶ PolicyRequest ──────▶ PolicyDecision                   │
-│   {method,              {principal,           {Green|Amber|                    │
-│    params,               resource,             Approval|Red}                       │
-│    id}                   action}                                               │
+│   REQ-CORE-003         REQ-POL-001                                             │
+│   ─────────────        ─────────────                                           │
+│   McpRequest    ──────▶ PolicyRequest ──────▶ PolicyAction                     │
+│   {method,              {principal,           {Forward|Approve|Reject}         │
+│    params,               resource,                                             │
+│    id}                   action}                   │                           │
 │                                                    │                           │
-│                                                    ▼                           │
-│                                           ┌───────────────┐                    │
-│                                           │ If Approval:      │                    │
-│                                           │               │                    │
-│   REQ-GOV-001          REQ-GOV-002       │  REQ-GOV-003  │                    │
-│   ─────────────        ─────────────     │  ───────────  │                    │
-│   Task          ◀───── PreApprovalResult     │               │                    │
-│   {id,                  {transformed,    │  Webhook ─────┼──▶ External        │
-│    status,               hash}           │               │                    │
-│    request,                              │  Callback ◀───┼─── External        │
-│    approval}                             │               │                    │
-│        │                                 └───────────────┘                    │
-│        │                                                                       │
-│        ▼                                                                       │
-│   REQ-GOV-002                                                                  │
-│   ─────────────                                                                │
-│   PipelineResult                                                               │
-│   {Success|Failure}                                                            │
-│        │                                                                       │
-│        ▼                                                                       │
-│   REQ-CORE-003                                                                 │
-│   ─────────────                                                                │
-│   McpResponse                                                                  │
-│   {result|error}                                                               │
+│            ┌───────────────────────────────────────┼───────────────────┐       │
+│            │                                       │                   │       │
+│            ▼                                       ▼                   ▼       │
+│   ┌────────────────┐                  ┌────────────────┐     ┌──────────────┐ │
+│   │    FORWARD     │                  │    APPROVE     │     │    REJECT    │ │
+│   │                │                  │                │     │              │ │
+│   │ Send to        │                  │ REQ-GOV-001    │     │ REQ-CORE-004 │ │
+│   │ upstream       │                  │ Block, Slack   │     │ Return error │ │
+│   │                │                  │                │     │              │ │
+│   └───────┬────────┘                  └───────┬────────┘     └──────────────┘ │
+│           │                                   │                               │
+│           │                                   ▼                               │
+│           │                       ┌────────────────────┐                      │
+│           │                       │ On Approve:        │                      │
+│           │                       │   Send to upstream │                      │
+│           │                       │ On Reject:         │                      │
+│           │                       │   Return error     │                      │
+│           │                       └───────┬────────────┘                      │
+│           │                               │                                   │
+│           └───────────────────────────────┼───────────────────────────────┐   │
+│                                           │                               │   │
+│                                           ▼                               ▼   │
+│                                 ┌───────────────────────────────────────────┐ │
+│                                 │            McpResponse                    │ │
+│                                 │            {result|error}                 │ │
+│                                 │                                           │ │
+│                                 │  Responses are passed through directly.   │ │
+│                                 │  No inspection or streaming distinction.  │ │
+│                                 └───────────────────────────────────────────┘ │
 │                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.3 Interface Contracts Summary
+### 5.3 Interface Contracts Summary (v0.1)
 
 | From | To | Interface | Data |
 |------|-----|-----------|------|
-| CORE-003 | POL-001 | `PolicyEngine::evaluate()` | `PolicyRequest` → `PolicyDecision` |
+| CORE-003 | POL-001 | `PolicyEngine::evaluate()` | `PolicyRequest` → `PolicyAction` |
 | CORE-003 | GOV-001 | `TaskManager::handle()` | SEP-1686 methods |
-| POL-001 | CORE-001 | Decision routing | `PolicyDecision::Green` |
-| POL-001 | CORE-002 | Decision routing | `PolicyDecision::Amber` |
-| POL-001 | GOV-001 | Decision routing | `PolicyDecision::Approval` |
-| POL-001 | CORE-004 | Decision routing | `PolicyDecision::Red` |
+| POL-001 | CORE-003 | Action routing | `PolicyAction::Forward` |
+| POL-001 | GOV-001 | Action routing | `PolicyAction::Approve` |
+| POL-001 | CORE-004 | Action routing | `PolicyAction::Reject` |
 | GOV-001 | GOV-002 | `ExecutionPipeline::execute_approved()` | `Task`, `ApprovalRecord` |
-| GOV-002 | POL-001 | `PolicyEngine::evaluate()` (re-eval) | `PolicyRequest` + `ApprovalGrant` |
-| GOV-002 | CORE-002 | Inspector chain | `InspectorDecision` |
 | GOV-003 | GOV-001 | `TaskManager::record_approval()` | `ApprovalCallback` |
-| GOV-003 | External | Webhook | `ApprovalWebhook` |
-| External | GOV-003 | Callback | `ApprovalCallback` |
+| GOV-003 | External | Slack message | Approval request |
+| External | GOV-003 | Reaction/polling | Approval decision |
+
+**Removed from v0.1:**
+- `PolicyAction::Green` / `PolicyAction::Amber` (no response path distinction)
+- Inspector chain interfaces (no request/response inspection)
 
 ## 6. Configuration Reference
 
@@ -392,25 +385,13 @@ ThoughtGate is an **MCP (Model Context Protocol) sidecar proxy** that implements
 | `THOUGHTGATE_KEEPALIVE_SECS` | `60` | Keep-alive timeout |
 | `THOUGHTGATE_MAX_REQUEST_BODY_BYTES` | `1048576` | Max request body (1MB) |
 
-#### Streaming (REQ-CORE-001)
+#### Streaming (REQ-CORE-001) - DEFERRED
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `THOUGHTGATE_TCP_NODELAY` | `true` | Disable Nagle's algorithm |
-| `THOUGHTGATE_TCP_KEEPALIVE_SECS` | `60` | TCP keep-alive |
-| `THOUGHTGATE_STREAM_READ_TIMEOUT_SECS` | `300` | Stream read timeout |
-| `THOUGHTGATE_STREAM_WRITE_TIMEOUT_SECS` | `300` | Stream write timeout |
-| `THOUGHTGATE_STREAM_TOTAL_TIMEOUT_SECS` | `3600` | Total stream timeout |
-| `THOUGHTGATE_MAX_CONCURRENT_STREAMS` | `10000` | Max concurrent streams |
+> **Note:** Streaming configuration is deferred to a future version. In v0.1, responses are passed through without special streaming handling.
 
-#### Buffering (REQ-CORE-002)
+#### Buffering (REQ-CORE-002) - DEFERRED
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `THOUGHTGATE_MAX_CONCURRENT_BUFFERS` | `100` | Max concurrent buffered requests |
-| `THOUGHTGATE_REQ_BUFFER_MAX` | `2097152` | Max request buffer (2MB) |
-| `THOUGHTGATE_RESP_BUFFER_MAX` | `10485760` | Max response buffer (10MB) |
-| `THOUGHTGATE_BUFFER_TIMEOUT_SECS` | `30` | Buffer operation timeout |
+> **Note:** Buffered inspection is deferred to a future version. In v0.1, no request/response inspection occurs.
 
 #### Policy Engine (REQ-POL-001)
 
@@ -478,13 +459,11 @@ ThoughtGate is an **MCP (Model Context Protocol) sidecar proxy** that implements
 |-----------|--------|-------|
 | **Sidecar Deployment** | Target | K8s pod co-location with agent |
 | MCP Transport (JSON-RPC, HTTP+SSE) | Draft | Single upstream |
-| Cedar Policy Engine | Draft | 4-way classification |
-| Green Path (streaming) | Implemented (Partial) | Zero-copy forwarding works; upgrades/timeouts partial |
-| Amber Path (buffering) | Implemented | Full inspector chain support |
-| Red Path (errors) | Draft | JSON-RPC error responses |
-| Approval Tasks (SEP-1686) | Draft | In-memory storage |
-| Execution Pipeline | Draft | Pre/Post-Approval |
-| Slack Adapter | Draft | Webhook + interactive |
+| Cedar Policy Engine | Draft | 3-way classification (Forward/Approve/Reject) |
+| Request Forwarding | Draft | Pass requests to upstream, return responses |
+| Reject (errors) | Draft | JSON-RPC error responses |
+| Blocking Approval Mode | Draft | Hold connection until approval (v0.1) |
+| Slack Integration | Draft | Polling-based approval |
 | Health/Readiness | Draft | K8s probes |
 | Graceful Shutdown | Draft | Connection draining |
 | Principal from Pod Labels | Draft | K8s downward API for identity |
@@ -493,6 +472,9 @@ ThoughtGate is an **MCP (Model Context Protocol) sidecar proxy** that implements
 
 | Feature | Notes |
 |---------|-------|
+| **Zero-Copy Streaming (Green Path)** | Deferred until response streaming/inspection needed |
+| **Buffered Inspection (Amber Path)** | Deferred until request/response inspection needed |
+| **SEP-1686 Task Polling** | v0.1 uses blocking mode; async tasks deferred |
 | **Gateway Deployment Mode** | Centralized proxy for multiple agents; requires auth |
 | **CLI Wrapper** | `thoughtgate wrap -- command` for local dev |
 | **Agent Authentication** | API keys, mTLS, JWT for gateway mode |
@@ -779,8 +761,6 @@ All metrics follow the pattern: `thoughtgate_<component>_<metric>_<unit>`
 | Prefix | Component | Requirement |
 |--------|-----------|-------------|
 | `thoughtgate_transport_` | MCP Transport | REQ-CORE-003 |
-| `thoughtgate_green_` | Green Path | REQ-CORE-001 |
-| `thoughtgate_amber_` | Amber Path | REQ-CORE-002 |
 | `thoughtgate_policy_` | Policy Engine | REQ-POL-001 |
 | `thoughtgate_tasks_` | Task Management | REQ-GOV-001 |
 | `thoughtgate_pipeline_` | Execution Pipeline | REQ-GOV-002 |
@@ -1034,19 +1014,20 @@ thoughtgate_tasks_created_total{principal="production/payment-agent"}
 |------|------------|
 | **MCP** | Model Context Protocol - standard for AI agent tool communication |
 | **SEP-1686** | MCP enhancement proposal for task-based async execution |
-| **Approval** | Approval-based - requiring human approval before execution |
+| **Approval** | Requiring human approval before execution |
 | **Cedar** | Policy language by AWS for fine-grained authorization |
 | **Principal** | Entity making a request (identified by K8s namespace + app name) |
-| **Green Path** | Zero-copy streaming for trusted traffic (REQ-CORE-001) |
-| **Amber Path** | Buffered inspection for traffic requiring validation (REQ-CORE-002) |
-| **Red Path** | Immediate rejection for denied traffic (REQ-CORE-004) |
-| **Approval Path** | Human approval workflow (REQ-GOV-001/002/003) |
+| **Forward** | Send request directly to upstream (v0.1 action) |
+| **Approve** | Require human approval before forwarding (v0.1 action) |
+| **Reject** | Deny request with error (v0.1 action) |
+| **Green Path** | Zero-copy streaming (deferred, REQ-CORE-001) |
+| **Amber Path** | Buffered inspection (deferred, REQ-CORE-002) |
+| **Blocking Mode** | v0.1 approval mode: hold HTTP connection until decision |
 | **Task** | SEP-1686 entity tracking async request through approval workflow |
-| **Inspector** | Component that examines and optionally transforms request bodies |
 | **Sidecar** | Deployment pattern where ThoughtGate runs alongside agent in same pod |
 | **Upstream** | The MCP server that ThoughtGate proxies requests to |
-| **Transform Drift** | Request body changed between approval and execution |
 | **Policy Drift** | Cedar policy changed between approval and execution |
+| **Zombie Execution** | Tool executes after client disconnected (prevented in v0.1) |
 
 ## 14. Quick Reference
 
@@ -1079,7 +1060,7 @@ THOUGHTGATE_TRANSFORM_DRIFT_MODE=strict
 SLACK_CHANNEL=#approvals
 ```
 
-### 14.3 Decision Flow (Quick Reference)
+### 14.3 Decision Flow (Quick Reference - v0.1)
 
 ```
 Request → Parse JSON-RPC → Route by Method
@@ -1092,19 +1073,22 @@ Request → Parse JSON-RPC → Route by Method
             ▼                 ▼                 ▼
        Cedar Policy     Task Handler      Pass Through
             │                                   │
-    ┌───────┼───────┬───────────┐              │
-    │       │       │           │              │
-    ▼       ▼       ▼           ▼              │
-  Green   Amber   Approval        Red              │
-    │       │       │           │              │
-    │       │       ▼           ▼              │
-    │       │    Create      Error             │
-    │       │    Task        Response          │
-    │       │       │                          │
-    └───────┴───────┴──────────────────────────┘
+    ┌───────┼───────────────────┐              │
+    │       │                   │              │
+    ▼       ▼                   ▼              │
+ Forward  Approve            Reject            │
+    │       │                   │              │
+    │       ▼                   ▼              │
+    │    Block until         Error             │
+    │    approval            Response          │
+    │       │                                  │
+    └───────┴──────────────────────────────────┘
                     │
                     ▼
                 Upstream
+                    │
+                    ▼
+              Response → Pass through to agent
 ```
 
 ## 15. References
@@ -1120,12 +1104,12 @@ Request → Parse JSON-RPC → Route by Method
 
 | ID | Title | Status | Type |
 |----|-------|--------|------|
-| REQ-CORE-001 | Zero-Copy Streaming (Green Path) | Implemented (Partial) | Core |
-| REQ-CORE-002 | Buffered Inspection (Amber Path) | Implemented | Core |
+| REQ-CORE-001 | Zero-Copy Streaming (Green Path) | **Deferred** | Core |
+| REQ-CORE-002 | Buffered Inspection (Amber Path) | **Deferred** | Core |
 | REQ-CORE-003 | MCP Transport & Routing | Draft | Core |
 | REQ-CORE-004 | Error Handling | Draft | Core |
 | REQ-CORE-005 | Operational Lifecycle | Draft | Core |
 | REQ-POL-001 | Cedar Policy Engine | Draft | Policy |
-| REQ-GOV-001 | Task Lifecycle & SEP-1686 | Draft | Governance |
-| REQ-GOV-002 | Approval Execution Pipeline | Draft | Governance |
+| REQ-GOV-001 | Task Lifecycle & SEP-1686 | Draft (blocking mode) | Governance |
+| REQ-GOV-002 | Approval Execution Pipeline | Draft (simplified) | Governance |
 | REQ-GOV-003 | Approval Integration | Draft | Governance |

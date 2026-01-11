@@ -1,9 +1,18 @@
 //! Cedar policy engine implementation.
 //!
-//! Implements: REQ-POL-001/F-001, F-002, F-005 (Policy Evaluation & Hot-Reload)
+//! Implements: REQ-POL-001/F-001, F-005 (Policy Evaluation & Hot-Reload)
+//!
+//! # v0.1 Simplified Model
+//!
+//! The engine evaluates Cedar policies and returns `PolicyAction`:
+//! - `Forward`: Send request to upstream immediately
+//! - `Approve`: Require human approval before forwarding
+//! - `Reject`: Deny the request
+//!
+//! Evaluation order: Forward → Approve → (default) Reject
 
 use super::{
-    PolicyDecision, PolicyError, PolicyRequest, PolicySource, PolicyStats, Resource, loader,
+    PolicyAction, PolicyError, PolicyRequest, PolicySource, PolicyStats, Resource, loader,
 };
 use arc_swap::ArcSwap;
 use cedar_policy::{
@@ -86,40 +95,25 @@ impl CedarEngine {
 
     /// Evaluate a policy request.
     ///
-    /// Implements: REQ-POL-001/F-001 (Initial Evaluation)
-    /// Implements: REQ-POL-001/F-002 (Post-Approval Evaluation)
+    /// Implements: REQ-POL-001/F-001 (Policy Evaluation - v0.1 Simplified)
     ///
-    /// # Decision Logic
-    /// - Without approval context: Check StreamRaw → Inspect → Approve → Red
-    /// - With approval context: Any permit → Amber, No permit → Red (drift)
-    pub fn evaluate(&self, request: &PolicyRequest) -> PolicyDecision {
+    /// # Decision Logic (v0.1)
+    /// Check Forward → Approve → Reject
+    ///
+    /// # Returns
+    /// - `PolicyAction::Forward` if Forward action is permitted
+    /// - `PolicyAction::Approve` if only Approve action is permitted
+    /// - `PolicyAction::Reject` if no action is permitted
+    pub fn evaluate(&self, request: &PolicyRequest) -> PolicyAction {
         self.stats.evaluation_count.fetch_add(1, Ordering::Relaxed);
 
         let policies = self.policies.load();
 
-        // Check if this is post-approval re-evaluation
-        let is_post_approval = request
-            .context
-            .as_ref()
-            .and_then(|c| c.approval_grant.as_ref())
-            .is_some();
-
-        if is_post_approval {
-            self.evaluate_post_approval(request, &policies)
-        } else {
-            self.evaluate_initial(request, &policies)
-        }
-    }
-
-    /// Evaluate initial request (without approval).
-    ///
-    /// Implements: REQ-POL-001/F-001
-    fn evaluate_initial(&self, request: &PolicyRequest, policies: &PolicySet) -> PolicyDecision {
-        // Check actions in priority order
-        let actions = ["StreamRaw", "Inspect", "Approve"];
+        // v0.1: Check actions in priority order: Forward → Approve
+        let actions = ["Forward", "Approve"];
 
         for action_name in &actions {
-            if self.is_action_permitted(request, action_name, policies) {
+            if self.is_action_permitted(request, action_name, &policies) {
                 debug!(
                     principal = %request.principal.app_name,
                     resource = ?request.resource,
@@ -128,9 +122,8 @@ impl CedarEngine {
                 );
 
                 return match *action_name {
-                    "StreamRaw" => PolicyDecision::Green,
-                    "Inspect" => PolicyDecision::Amber,
-                    "Approve" => PolicyDecision::Approval {
+                    "Forward" => PolicyAction::Forward,
+                    "Approve" => PolicyAction::Approve {
                         timeout: Duration::from_secs(300), // Default 5 minutes
                     },
                     _ => unreachable!(),
@@ -138,62 +131,15 @@ impl CedarEngine {
             }
         }
 
-        // No action permitted - Red path
+        // No action permitted - Reject
         warn!(
             principal = %request.principal.app_name,
             resource = ?request.resource,
             "Policy denied - no permitted action"
         );
 
-        PolicyDecision::Red {
+        PolicyAction::Reject {
             reason: "No policy permits this request".to_string(),
-        }
-    }
-
-    /// Evaluate post-approval request.
-    ///
-    /// Implements: REQ-POL-001/F-002 (Post-Approval Evaluation)
-    ///
-    /// Any permitted action returns Amber (request already buffered).
-    /// No permitted action returns Red (policy drift).
-    fn evaluate_post_approval(
-        &self,
-        request: &PolicyRequest,
-        policies: &PolicySet,
-    ) -> PolicyDecision {
-        let actions = ["StreamRaw", "Inspect", "Approve"];
-
-        for action_name in &actions {
-            if self.is_action_permitted(request, action_name, policies) {
-                debug!(
-                    principal = %request.principal.app_name,
-                    resource = ?request.resource,
-                    action = action_name,
-                    "Post-approval policy still permits"
-                );
-
-                // Always return Amber (already buffered)
-                return PolicyDecision::Amber;
-            }
-        }
-
-        // Policy drift - no longer permitted
-        let approval_grant = request
-            .context
-            .as_ref()
-            .and_then(|c| c.approval_grant.as_ref());
-
-        if let Some(grant) = approval_grant {
-            error!(
-                principal = %request.principal.app_name,
-                resource = ?request.resource,
-                task_id = %grant.task_id,
-                "Policy drift detected - approved request now denied"
-            );
-        }
-
-        PolicyDecision::Red {
-            reason: "Policy changed - request no longer permitted (policy drift)".to_string(),
         }
     }
 
@@ -398,7 +344,7 @@ impl CedarEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{ApprovalGrant, PolicyContext, Principal};
+    use crate::policy::Principal;
     use serial_test::serial;
 
     fn test_principal() -> Principal {
@@ -435,9 +381,9 @@ mod tests {
             context: None,
         };
 
-        // Default policies permit all actions, so first check (StreamRaw) should return Green
-        let decision = engine.evaluate(&request);
-        assert!(matches!(decision, PolicyDecision::Green));
+        // Default policies permit all actions, so first check (Forward) should return Forward
+        let action = engine.evaluate(&request);
+        assert!(matches!(action, PolicyAction::Forward));
     }
 
     #[test]
@@ -461,18 +407,18 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // Edge Case Tests (EC-POL-001 to EC-POL-016)
+    // Edge Case Tests (EC-POL-001 to EC-POL-003) - v0.1 Simplified
     // ═══════════════════════════════════════════════════════════
 
-    /// EC-POL-001: StreamRaw permitted → Return Green
+    /// EC-POL-001: Forward permitted → Return Forward
     #[test]
     #[serial]
-    fn test_ec_pol_001_streamraw_permitted() {
-        // Create engine with custom policy that only permits StreamRaw
+    fn test_ec_pol_001_forward_permitted() {
+        // Create engine with custom policy that only permits Forward
         let policy_str = r#"
             permit(
                 principal == ThoughtGate::App::"test-app",
-                action == ThoughtGate::Action::"StreamRaw",
+                action == ThoughtGate::Action::"Forward",
                 resource == ThoughtGate::ToolCall::"test_tool"
             );
         "#;
@@ -489,50 +435,18 @@ mod tests {
             context: None,
         };
 
-        let decision = engine.evaluate(&request);
-        assert!(matches!(decision, PolicyDecision::Green));
+        let action = engine.evaluate(&request);
+        assert!(matches!(action, PolicyAction::Forward));
 
         unsafe {
             std::env::remove_var("THOUGHTGATE_POLICIES");
         }
     }
 
-    /// EC-POL-002: Only Inspect permitted → Return Amber
+    /// EC-POL-002: Only Approve permitted → Return Approve
     #[test]
     #[serial]
-    fn test_ec_pol_002_inspect_only() {
-        let policy_str = r#"
-            permit(
-                principal == ThoughtGate::App::"test-app",
-                action == ThoughtGate::Action::"Inspect",
-                resource == ThoughtGate::ToolCall::"test_tool"
-            );
-        "#;
-
-        unsafe {
-            std::env::set_var("THOUGHTGATE_POLICIES", policy_str);
-        }
-
-        let engine = CedarEngine::new().expect("Failed to create engine");
-
-        let request = PolicyRequest {
-            principal: test_principal(),
-            resource: test_tool_call("test_tool"),
-            context: None,
-        };
-
-        let decision = engine.evaluate(&request);
-        assert!(matches!(decision, PolicyDecision::Amber));
-
-        unsafe {
-            std::env::remove_var("THOUGHTGATE_POLICIES");
-        }
-    }
-
-    /// EC-POL-003: Only Approve permitted → Return Approval
-    #[test]
-    #[serial]
-    fn test_ec_pol_003_approve_only() {
+    fn test_ec_pol_002_approve_only() {
         let policy_str = r#"
             permit(
                 principal == ThoughtGate::App::"test-app",
@@ -553,23 +467,23 @@ mod tests {
             context: None,
         };
 
-        let decision = engine.evaluate(&request);
-        assert!(matches!(decision, PolicyDecision::Approval { .. }));
+        let action = engine.evaluate(&request);
+        assert!(matches!(action, PolicyAction::Approve { .. }));
 
         unsafe {
             std::env::remove_var("THOUGHTGATE_POLICIES");
         }
     }
 
-    /// EC-POL-004: No action permitted → Return Red
+    /// EC-POL-003: No action permitted → Return Reject
     #[test]
     #[serial]
-    fn test_ec_pol_004_no_action_permitted() {
+    fn test_ec_pol_003_no_action_permitted() {
         let policy_str = r#"
             // Permit a different principal, not test-app
             permit(
                 principal == ThoughtGate::App::"other-app",
-                action == ThoughtGate::Action::"StreamRaw",
+                action == ThoughtGate::Action::"Forward",
                 resource == ThoughtGate::ToolCall::"test_tool"
             );
         "#;
@@ -586,104 +500,18 @@ mod tests {
             context: None,
         };
 
-        let decision = engine.evaluate(&request);
-        assert!(matches!(decision, PolicyDecision::Red { .. }));
+        let action = engine.evaluate(&request);
+        assert!(matches!(action, PolicyAction::Reject { .. }));
 
         unsafe {
             std::env::remove_var("THOUGHTGATE_POLICIES");
         }
     }
 
-    /// EC-POL-005: Post-approval, still permitted → Return Amber
+    /// EC-POL-007: Invalid policy syntax → Keep old policies
     #[test]
     #[serial]
-    fn test_ec_pol_005_post_approval_permitted() {
-        // Policy permits StreamRaw
-        let policy_str = r#"
-            permit(
-                principal == ThoughtGate::App::"test-app",
-                action == ThoughtGate::Action::"StreamRaw",
-                resource == ThoughtGate::ToolCall::"test_tool"
-            );
-        "#;
-
-        unsafe {
-            std::env::set_var("THOUGHTGATE_POLICIES", policy_str);
-        }
-
-        let engine = CedarEngine::new().expect("Failed to create engine");
-
-        // Request with approval grant
-        let request = PolicyRequest {
-            principal: test_principal(),
-            resource: test_tool_call("test_tool"),
-            context: Some(PolicyContext {
-                approval_grant: Some(ApprovalGrant {
-                    task_id: "task-123".to_string(),
-                    approved_by: "admin@example.com".to_string(),
-                    approved_at: 1234567890,
-                }),
-            }),
-        };
-
-        let decision = engine.evaluate(&request);
-        // Post-approval always returns Amber (already buffered)
-        assert!(matches!(decision, PolicyDecision::Amber));
-
-        unsafe {
-            std::env::remove_var("THOUGHTGATE_POLICIES");
-        }
-    }
-
-    /// EC-POL-006: Post-approval, now denied → Return Red (policy drift)
-    #[test]
-    #[serial]
-    fn test_ec_pol_006_post_approval_denied() {
-        // Policy denies everything for test-app
-        let policy_str = r#"
-            permit(
-                principal == ThoughtGate::App::"other-app",
-                action,
-                resource
-            );
-        "#;
-
-        unsafe {
-            std::env::set_var("THOUGHTGATE_POLICIES", policy_str);
-        }
-
-        let engine = CedarEngine::new().expect("Failed to create engine");
-
-        // Request with approval grant
-        let request = PolicyRequest {
-            principal: test_principal(),
-            resource: test_tool_call("test_tool"),
-            context: Some(PolicyContext {
-                approval_grant: Some(ApprovalGrant {
-                    task_id: "task-123".to_string(),
-                    approved_by: "admin@example.com".to_string(),
-                    approved_at: 1234567890,
-                }),
-            }),
-        };
-
-        let decision = engine.evaluate(&request);
-        // Policy drift detected
-        assert!(matches!(decision, PolicyDecision::Red { .. }));
-
-        if let PolicyDecision::Red { reason } = decision {
-            assert!(reason.contains("drift"));
-        }
-
-        unsafe {
-            std::env::remove_var("THOUGHTGATE_POLICIES");
-        }
-    }
-
-    /// EC-POL-010: Invalid policy syntax → Keep old policies
-    #[test]
-    #[serial]
-    fn test_ec_pol_010_invalid_syntax() {
+    fn test_ec_pol_007_invalid_syntax() {
         // First create engine with valid policies
         let valid_policy = r#"
             permit(principal, action, resource);
@@ -701,7 +529,7 @@ mod tests {
             resource: test_tool_call("test_tool"),
             context: None,
         };
-        assert!(matches!(engine.evaluate(&request), PolicyDecision::Green));
+        assert!(matches!(engine.evaluate(&request), PolicyAction::Forward));
 
         // Now try to reload with invalid syntax
         unsafe {
@@ -712,17 +540,17 @@ mod tests {
         assert!(result.is_err());
 
         // Engine should still work with old policies
-        assert!(matches!(engine.evaluate(&request), PolicyDecision::Green));
+        assert!(matches!(engine.evaluate(&request), PolicyAction::Forward));
 
         unsafe {
             std::env::remove_var("THOUGHTGATE_POLICIES");
         }
     }
 
-    /// EC-POL-011: Schema violation → Keep old policies
+    /// EC-POL-008: Schema violation → Keep old policies
     #[test]
     #[serial]
-    fn test_ec_pol_011_schema_violation() {
+    fn test_ec_pol_008_schema_violation() {
         // First create engine with valid policies
         let valid_policy = r#"
             permit(principal, action, resource);
@@ -738,7 +566,7 @@ mod tests {
         let invalid_policy = r#"
             permit(
                 principal == ThoughtGate::InvalidEntity::"test",
-                action == ThoughtGate::Action::"StreamRaw",
+                action == ThoughtGate::Action::"Forward",
                 resource
             );
         "#;
@@ -756,17 +584,17 @@ mod tests {
             resource: test_tool_call("test_tool"),
             context: None,
         };
-        assert!(matches!(engine.evaluate(&request), PolicyDecision::Green));
+        assert!(matches!(engine.evaluate(&request), PolicyAction::Forward));
 
         unsafe {
             std::env::remove_var("THOUGHTGATE_POLICIES");
         }
     }
 
-    /// EC-POL-012: Policy reload → Statistics updated
+    /// EC-POL-009: Policy reload → Statistics updated
     #[test]
     #[serial]
-    fn test_ec_pol_012_reload_updates_stats() {
+    fn test_ec_pol_009_reload_updates_stats() {
         unsafe {
             std::env::set_var(
                 "THOUGHTGATE_POLICIES",

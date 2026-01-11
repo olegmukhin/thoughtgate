@@ -1,25 +1,37 @@
-//! Error types for the ThoughtGate proxy.
+//! Error types for the ThoughtGate HTTP proxy layer.
+//!
+//! # v0.1 Status
+//!
+//! These error types support the underlying HTTP proxy infrastructure.
+//! The Green Path (streaming) and Amber Path (inspection) are **deferred** to v0.2+,
+//! but the error types are retained for when these features are enabled.
+//!
+//! In v0.1, only the common connection/timeout errors are used. Inspection errors
+//! will be used when Amber Path is activated.
 //!
 //! # Traceability
-//! - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy)
-//! - Implements: REQ-CORE-001 F-002 (Fail-Fast Error Propagation)
-//! - Implements: REQ-CORE-002 (Buffered Termination Strategy)
+//! - Deferred: REQ-CORE-001 (Zero-Copy Streaming)
+//! - Deferred: REQ-CORE-002 (Buffered Inspection)
 
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
 use thiserror::Error;
 
-/// Errors that can occur during proxy operations.
+/// Errors that can occur during HTTP proxy operations.
 ///
 /// This enum uses `thiserror` to provide structured error types that preserve
 /// type information and enable explicit error handling throughout the proxy.
 ///
+/// # v0.1 Status
+///
+/// - Common errors (Connection, Timeout) are used in v0.1
+/// - Streaming errors (Green Path) are deferred to v0.2+
+/// - Inspection errors (Amber Path) are deferred to v0.2+
+///
 /// # Traceability
-/// - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy - error handling)
-/// - Implements: REQ-CORE-001 F-002 (Fail-Fast Error Propagation)
-/// - Implements: REQ-CORE-002 F-001 (Safe Buffering errors)
-/// - Implements: REQ-CORE-002 F-002 (Fail-Closed State)
+/// - Deferred: REQ-CORE-001 (Zero-Copy Streaming errors)
+/// - Deferred: REQ-CORE-002 (Buffered Inspection errors)
 #[derive(Error, Debug)]
 pub enum ProxyError {
     // ─────────────────────────────────────────────────────────────────────────
@@ -38,7 +50,8 @@ pub enum ProxyError {
     Io(#[from] std::io::Error),
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Green Path Errors (REQ-CORE-001)
+    // Upstream Connection Errors (used in v0.1 for Forward action)
+    // Green Path streaming deferred to v0.2+ (REQ-CORE-001)
     // ─────────────────────────────────────────────────────────────────────────
     /// Connection error to upstream (maps to 502 Bad Gateway)
     #[error("Connection error: {0}")]
@@ -65,7 +78,8 @@ pub enum ProxyError {
     Client(String),
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Amber Path Errors (REQ-CORE-002)
+    // Inspection Errors - DEFERRED TO v0.2+ (REQ-CORE-002)
+    // These errors are retained for when Amber Path inspection is enabled.
     // ─────────────────────────────────────────────────────────────────────────
     /// Payload exceeds buffer limit (maps to 413 Payload Too Large)
     ///

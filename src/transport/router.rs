@@ -34,9 +34,9 @@ use crate::transport::jsonrpc::McpRequest;
 pub enum RouteTarget {
     /// Forward to policy engine for classification.
     ///
-    /// The policy engine will determine Green/Amber/Red/Approval path
-    /// based on Cedar policies. Used for tool calls, resource access,
-    /// and prompt execution.
+    /// The policy engine will determine Forward/Approve/Reject action
+    /// based on Cedar policies (v0.1 simplified model). Used for tool calls,
+    /// resource access, and prompt execution.
     PolicyEvaluation {
         /// The request to evaluate
         request: McpRequest,

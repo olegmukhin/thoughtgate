@@ -51,33 +51,20 @@ namespace ThoughtGate {
     };
 
     // ═══════════════════════════════════════════════════════════
-    // ACTIONS
+    // ACTIONS (v0.1 Simplified)
     // ═══════════════════════════════════════════════════════════
 
-    /// Green Path: Stream through without buffering
-    action "StreamRaw" appliesTo {
+    /// Forward: Send request to upstream immediately
+    action "Forward" appliesTo {
         principal: [App, Role],
         resource: [ToolCall, McpMethod],
-        context: {
-            "approval_grant"?: ApprovalGrant,
-        }
     };
 
-    /// Amber Path: Buffer and inspect
-    action "Inspect" appliesTo {
-        principal: [App, Role],
-        resource: [ToolCall, McpMethod],
-        context: {
-            "approval_grant"?: ApprovalGrant,
-        }
-    };
-
-    /// Approval Path: Require human/agent approval
+    /// Approve: Require human/agent approval before forwarding
     action "Approve" appliesTo {
         principal: [App, Role],
         resource: [ToolCall, McpMethod],
-        context: {
-            "approval_grant"?: ApprovalGrant,
-        }
     };
+
+    // Reject is implicit: no action permitted = reject
 }

@@ -50,19 +50,22 @@ This requirement defines the **policy decision layer** for ThoughtGate—how req
 
 The system must:
 1. Define a Cedar schema for MCP request classification
-2. Evaluate policies to produce 4-way routing decisions
-3. Support post-approval re-evaluation with approval context
-4. Load policies from ConfigMap, environment, or embedded defaults
-5. Hot-reload policies without restart
-6. Infer principal identity from Kubernetes environment
+2. Evaluate policies to produce 3-way routing decisions (Forward/Approve/Reject)
+3. Load policies from ConfigMap, environment, or embedded defaults
+4. Hot-reload policies without restart
+5. Infer principal identity from Kubernetes environment
+
+> **v0.1 Simplification:** The 4-way classification (Green/Amber/Approval/Red) is reduced to
+> 3 actions (Forward/Approve/Reject). Green and Amber paths are deferred until response
+> inspection or streaming is needed. Post-approval re-evaluation is simplified since there's
+> no Amber Path inspection to perform.
 
 ## 4. Scope
 
 ### 4.1 In Scope
 - Cedar schema definition (entities, actions)
 - Policy evaluation logic
-- 4-way decision output (Green, Amber, Approval, Red)
-- Post-approval re-evaluation (with ApprovalGrant context)
+- 3-way action output (Forward, Approve, Reject) - v0.1
 - Policy loading (ConfigMap → Env → Embedded)
 - Policy hot-reload
 - Schema validation
@@ -75,6 +78,8 @@ The system must:
 - Policy testing framework (deferred to future version)
 - Policy versioning/history (deferred to future version)
 - CRD-based policy management (architecture supports, not implemented)
+- 4-way classification (Green/Amber/Approval/Red) - deferred to v0.2+
+- Post-approval re-evaluation with ApprovalGrant context - deferred to v0.2+
 
 ## 5. Constraints
 
@@ -135,60 +140,61 @@ entity ApprovalGrant = {
 };
 
 // ═══════════════════════════════════════════════════════════
-// ACTIONS
+// ACTIONS (v0.1 Simplified)
 // ═══════════════════════════════════════════════════════════
 
-/// Green Path: Stream through without buffering
-action StreamRaw appliesTo {
+/// Forward: Send request to upstream immediately
+action Forward appliesTo {
     principal: [App, Role],
     resource: [ToolCall, McpMethod],
 };
 
-/// Amber Path: Buffer and inspect
-action Inspect appliesTo {
-    principal: [App, Role],
-    resource: [ToolCall, McpMethod],
-};
-
-/// Approval Path: Require human/agent approval
+/// Approve: Require human/agent approval before forwarding
 action Approve appliesTo {
     principal: [App, Role],
     resource: [ToolCall, McpMethod],
 };
+
+// Reject is implicit: no action permitted = reject
 ```
 
-### 5.2.1 Action Semantics (Routing Reference)
+> **v0.1 Note:** `StreamRaw` and `Inspect` actions are removed. When response inspection
+> or streaming is needed in future versions, these can be reintroduced.
 
-**Action-to-Path Mapping:**
-| Cedar Action | String Literal | Path | Behavior |
-|--------------|----------------|------|----------|
-| `StreamRaw` | `"ThoughtGate::Action::StreamRaw"` | Green | Zero-copy response streaming |
-| `Inspect` | `"ThoughtGate::Action::Inspect"` | Amber | Buffer, inspect, optional transform |
-| `Approve` | `"ThoughtGate::Action::Approve"` | Approval | Create task, await approval decision |
-| (none permitted) | N/A | Red | Reject with policy denial error |
+### 5.2.1 Action Semantics (Routing Reference) - v0.1
+
+**Action-to-Behavior Mapping:**
+| Cedar Action | String Literal | Behavior |
+|--------------|----------------|----------|
+| `Forward` | `"ThoughtGate::Action::Forward"` | Send request to upstream immediately |
+| `Approve` | `"ThoughtGate::Action::Approve"` | Block until human approval, then forward |
+| (none permitted) | N/A | Reject with policy denial error (-32003) |
 
 **Evaluation Order:**
 The policy engine checks actions in this order and returns the first permitted:
-1. `StreamRaw` → Green Path
-2. `Inspect` → Amber Path  
-3. `Approve` → Approval Path
-4. (default) → Red Path
+1. `Forward` → Send to upstream
+2. `Approve` → Block for approval
+3. (default) → Reject
 
 **Cross-Module Reference:**
 Other modules MUST use these exact action strings when calling Cedar:
 ```rust
 // In REQ-CORE-003 (MCP Transport) routing:
-let decision = policy_engine.evaluate(
+let action = policy_engine.evaluate(
     &principal,
     &resource,
-    "ThoughtGate::Action::StreamRaw",  // Check Green first
+    "ThoughtGate::Action::Forward",  // Check Forward first
 );
 
-// In REQ-GOV-002 (Pipeline) post-approval re-evaluation:
-let actions = ["StreamRaw", "Inspect", "Approve"];
-for action in actions {
-    if policy_engine.is_permitted(&principal, &resource, action, &approval_context) {
-        return PolicyDecision::Amber;  // Any permit = proceed
+match action {
+    PolicyAction::Forward => upstream.forward(request).await,
+    PolicyAction::Approve { timeout } => {
+        // Block until approval (v0.1 mode)
+        let approval = wait_for_approval(request, timeout).await?;
+        upstream.forward(request).await
+    }
+    PolicyAction::Reject { reason } => {
+        Err(ThoughtGateError::PolicyDenied { reason })
     }
 }
 ```
@@ -266,44 +272,45 @@ pub struct ApprovalGrant {
 }
 ```
 
-### 6.2 Output: Policy Decision
+### 6.2 Output: Policy Action (v0.1)
 
 ```rust
-pub enum PolicyDecision {
-    /// Green Path: Stream through without buffering
-    Green,
-    
-    /// Amber Path: Buffer and inspect
-    Amber,
-    
-    /// Approval Path: Require approval before proceeding
-    Approval {
-        /// Suggested timeout for approval
+/// v0.1 Simplified Policy Actions
+pub enum PolicyAction {
+    /// Forward request to upstream immediately
+    Forward,
+
+    /// Require approval before forwarding (block until decision)
+    Approve {
+        /// Timeout for approval workflow
         timeout: Duration,
     },
-    
-    /// Red Path: Deny the request
-    Red {
+
+    /// Reject the request
+    Reject {
         /// Reason for denial (safe for logging, not user-facing)
         reason: String,
     },
 }
 ```
 
+> **Note:** The 4-way `PolicyDecision` enum (Green/Amber/Approval/Red) from the original
+> design is simplified to 3 actions for v0.1. Green and Amber paths are deferred.
+
 ### 6.3 Cedar Engine Interface
 
 ```rust
 #[async_trait]
 pub trait PolicyEngine: Send + Sync {
-    /// Evaluate a request and return routing decision
-    fn evaluate(&self, request: &PolicyRequest) -> PolicyDecision;
-    
+    /// Evaluate a request and return action (v0.1 simplified)
+    fn evaluate(&self, request: &PolicyRequest) -> PolicyAction;
+
     /// Reload policies from configured source
     async fn reload(&self) -> Result<(), PolicyError>;
-    
+
     /// Get current policy source
     fn policy_source(&self) -> PolicySource;
-    
+
     /// Get policy statistics
     fn stats(&self) -> PolicyStats;
 }
@@ -342,60 +349,33 @@ pub enum PolicyError {
 
 ## 7. Functional Requirements
 
-### F-001: Policy Evaluation (Initial Request)
-
-For requests WITHOUT approval context:
+### F-001: Policy Evaluation (v0.1 Simplified)
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│           INITIAL POLICY EVALUATION                      │
+│           POLICY EVALUATION (v0.1)                       │
 │                                                          │
-│   1. Check: Is StreamRaw permitted?                      │
-│      └─► YES → Return Green                              │
+│   1. Check: Is Forward permitted?                        │
+│      └─► YES → Return Forward                            │
 │                                                          │
-│   2. Check: Is Inspect permitted?                        │
-│      └─► YES → Return Amber                              │
+│   2. Check: Is Approve permitted?                        │
+│      └─► YES → Return Approve                            │
 │                                                          │
-│   3. Check: Is Approve permitted?                        │
-│      └─► YES → Return Approval                           │
-│                                                          │
-│   4. Default: Return Red (denied)                        │
+│   3. Default: Return Reject (denied)                     │
 │                                                          │
 └─────────────────────────────────────────────────────────┘
 ```
 
-- **F-001.1:** Evaluate actions in order: StreamRaw → Inspect → Approve
-- **F-001.2:** First permitted action determines the decision
-- **F-001.3:** No permitted action results in Red (deny)
+- **F-001.1:** Evaluate actions in order: Forward → Approve
+- **F-001.2:** First permitted action determines the result
+- **F-001.3:** No permitted action results in Reject
 - **F-001.4:** Evaluation must complete in < 1ms (P99)
 
-### F-002: Policy Evaluation (Post-Approval)
+### F-002: Post-Approval Handling - DEFERRED
 
-For requests WITH approval context (re-evaluation after approval):
-
-```
-┌─────────────────────────────────────────────────────────┐
-│           POST-APPROVAL POLICY EVALUATION                │
-│                                                          │
-│   Context: ApprovalGrant present                         │
-│                                                          │
-│   1. Check: Is StreamRaw OR Inspect OR Approve           │
-│      permitted?                                          │
-│      └─► YES → Return Amber (already buffered)           │
-│                                                          │
-│   2. Default: Return Red (policy drift)                  │
-│                                                          │
-│   Note: Green is not possible (request already buffered) │
-│   Note: Approval is not returned (already approved)      │
-│                                                          │
-└─────────────────────────────────────────────────────────┘
-```
-
-- **F-002.1:** Any permitted action (StreamRaw/Inspect/Approve) returns Amber
-- **F-002.2:** Cannot return Green (request is already buffered)
-- **F-002.3:** Cannot return Approval (already has approval)
-- **F-002.4:** No permitted action returns Red (policy drift)
-- **F-002.5:** Log policy drift as significant event
+> **Deferred to v0.2+:** Post-approval re-evaluation with ApprovalGrant context is deferred.
+> In v0.1 blocking mode, once approval is received, the request is forwarded immediately
+> without re-evaluation. Policy drift detection will be added in a future version.
 
 ### F-003: Policy Loading
 
@@ -518,7 +498,7 @@ fn infer_principal() -> Result<Principal, PolicyError> {
 - **F-006.3:** Log warning when using dev mode
 - **F-006.4:** Fail startup if K8s identity required but not available
 
-### F-007: Embedded Default Policy
+### F-007: Embedded Default Policy (v0.1)
 
 ```cedar
 // Default permissive policy for development
@@ -526,13 +506,7 @@ fn infer_principal() -> Result<Principal, PolicyError> {
 
 permit(
     principal,
-    action == ThoughtGate::Action::"StreamRaw",
-    resource
-);
-
-permit(
-    principal,
-    action == ThoughtGate::Action::"Inspect",
+    action == ThoughtGate::Action::"Forward",
     resource
 );
 
@@ -543,7 +517,7 @@ permit(
 );
 ```
 
-- **F-007.1:** Embedded policy permits all actions (for dev)
+- **F-007.1:** Embedded policy permits Forward and Approve (for dev)
 - **F-007.2:** Log WARNING when embedded policy is active
 - **F-007.3:** Embedded policy should never be used in production
 
@@ -553,17 +527,15 @@ permit(
 
 **Metrics:**
 ```
-policy_evaluations_total{decision="green|amber|hitl|red"}
+policy_evaluations_total{action="forward|approve|reject"}
 policy_evaluation_duration_seconds{quantile="0.5|0.9|0.99"}
 policy_reloads_total{status="success|failure"}
 policy_source{source="configmap|env|embedded"}
-policy_drift_total  // Post-approval denials
 ```
 
 **Logging:**
 ```json
-{"level":"info","message":"Policy evaluation","principal":"app-xyz","resource":"delete_user","decision":"hitl"}
-{"level":"warn","message":"Policy drift detected","task_id":"abc-123","original_decision":"hitl","new_decision":"red"}
+{"level":"info","message":"Policy evaluation","principal":"app-xyz","resource":"delete_user","action":"approve"}
 {"level":"info","message":"Policies reloaded","source":"configmap","policy_count":12}
 ```
 
@@ -581,9 +553,8 @@ policy_drift_total  // Post-approval denials
     "type": "tool_call",
     "name": "delete_user"
   },
-  "decision": "hitl",
-  "policy_source": "configmap",
-  "has_approval_context": false
+  "action": "approve",
+  "policy_source": "configmap"
 }
 ```
 
@@ -604,36 +575,30 @@ policy_drift_total  // Post-approval denials
 
 ## 9. Verification Plan
 
-### 9.1 Edge Case Matrix
+### 9.1 Edge Case Matrix (v0.1)
 
 | Scenario | Expected Behavior | Test ID |
 |----------|-------------------|---------|
-| StreamRaw permitted | Return Green | EC-POL-001 |
-| Only Inspect permitted | Return Amber | EC-POL-002 |
-| Only Approve permitted | Return Approval | EC-POL-003 |
-| No action permitted | Return Red | EC-POL-004 |
-| Post-approval, still permitted | Return Amber | EC-POL-005 |
-| Post-approval, now denied | Return Red (drift) | EC-POL-006 |
-| ConfigMap exists | Load from ConfigMap | EC-POL-007 |
-| ConfigMap missing, Env exists | Load from Env | EC-POL-008 |
-| Both missing | Load embedded | EC-POL-009 |
-| ConfigMap invalid syntax | Keep old, log error | EC-POL-010 |
-| ConfigMap schema violation | Keep old, log error | EC-POL-011 |
-| ConfigMap updated | Reload within interval | EC-POL-012 |
-| K8s identity available | Infer principal | EC-POL-013 |
-| K8s identity missing, dev mode | Use dev principal | EC-POL-014 |
-| K8s identity missing, no dev | Fail startup | EC-POL-015 |
-| Role-based policy | Match role hierarchy | EC-POL-016 |
+| Forward permitted | Return Forward | EC-POL-001 |
+| Only Approve permitted | Return Approve | EC-POL-002 |
+| No action permitted | Return Reject | EC-POL-003 |
+| ConfigMap exists | Load from ConfigMap | EC-POL-004 |
+| ConfigMap missing, Env exists | Load from Env | EC-POL-005 |
+| Both missing | Load embedded | EC-POL-006 |
+| ConfigMap invalid syntax | Keep old, log error | EC-POL-007 |
+| ConfigMap schema violation | Keep old, log error | EC-POL-008 |
+| ConfigMap updated | Reload within interval | EC-POL-009 |
+| K8s identity available | Infer principal | EC-POL-010 |
+| K8s identity missing, dev mode | Use dev principal | EC-POL-011 |
+| K8s identity missing, no dev | Fail startup | EC-POL-012 |
+| Role-based policy | Match role hierarchy | EC-POL-013 |
 
 ### 9.2 Assertions
 
 **Unit Tests:**
-- `test_evaluate_green_path` — StreamRaw permits return Green
-- `test_evaluate_amber_path` — Inspect permits return Amber
-- `test_evaluate_approval_path` — Approve permits return Approval
-- `test_evaluate_red_path` — No permits return Red
-- `test_post_approval_permitted` — With approval context, returns Amber
-- `test_post_approval_denied` — Policy drift returns Red
+- `test_evaluate_forward` — Forward permits return Forward
+- `test_evaluate_approve` — Approve permits return Approve
+- `test_evaluate_reject` — No permits return Reject
 - `test_policy_loading_priority` — ConfigMap > Env > Embedded
 - `test_schema_validation` — Invalid policies rejected
 
@@ -648,7 +613,7 @@ policy_drift_total  // Post-approval denials
 
 ## 10. Implementation Reference
 
-### Cedar Engine Implementation
+### Cedar Engine Implementation (v0.1)
 
 ```rust
 pub struct CedarEngine {
@@ -656,72 +621,54 @@ pub struct CedarEngine {
     policies: ArcSwap<PolicySet>,
     schema: Schema,
     principal: Principal,
-    config: PolicyConfig,
 }
 
 impl CedarEngine {
-    pub fn evaluate(&self, request: &PolicyRequest) -> PolicyDecision {
+    /// Evaluate a policy request.
+    ///
+    /// # Decision Logic (v0.1)
+    /// Check Forward → Approve → Reject
+    ///
+    /// # Returns
+    /// - `PolicyAction::Forward` if Forward action is permitted
+    /// - `PolicyAction::Approve` if only Approve action is permitted
+    /// - `PolicyAction::Reject` if no action is permitted
+    pub fn evaluate(&self, request: &PolicyRequest) -> PolicyAction {
         let policies = self.policies.load();
-        
-        let cedar_request = self.build_cedar_request(request);
-        
-        // Check actions in priority order
-        let actions = if request.context.approval_grant.is_some() {
-            // Post-approval: any permit means Amber
-            vec![Action::StreamRaw, Action::Inspect, Action::Approve]
-        } else {
-            // Initial: check in order
-            vec![Action::StreamRaw, Action::Inspect, Action::Approve]
-        };
-        
-        for action in &actions {
-            let response = self.authorizer.is_authorized(
-                &cedar_request.with_action(action),
-                &policies,
-                &self.entities,
-            );
-            
-            if response.decision() == Decision::Allow {
-                return self.action_to_decision(action, request);
+
+        // v0.1: Check actions in priority order: Forward → Approve
+        let actions = ["Forward", "Approve"];
+
+        for action_name in &actions {
+            if self.is_action_permitted(request, action_name, &policies) {
+                return match *action_name {
+                    "Forward" => PolicyAction::Forward,
+                    "Approve" => PolicyAction::Approve {
+                        timeout: Duration::from_secs(300), // Default 5 minutes
+                    },
+                    _ => unreachable!(),
+                };
             }
         }
-        
-        PolicyDecision::Red {
-            reason: "No policy permits this request".into(),
-        }
-    }
-    
-    fn action_to_decision(
-        &self,
-        action: &Action,
-        request: &PolicyRequest,
-    ) -> PolicyDecision {
-        // Post-approval always returns Amber (already buffered)
-        if request.context.approval_grant.is_some() {
-            return PolicyDecision::Amber;
-        }
-        
-        match action {
-            Action::StreamRaw => PolicyDecision::Green,
-            Action::Inspect => PolicyDecision::Amber,
-            Action::Approve => PolicyDecision::Approval {
-                timeout: Duration::from_secs(600),
-            },
+
+        // No action permitted - Reject
+        PolicyAction::Reject {
+            reason: "No policy permits this request".to_string(),
         }
     }
 }
 ```
 
-### Example Policies
+### Example Policies (v0.1)
 
 ```cedar
 // ══════════════════════════════════════════════════════════
-// GREEN PATH: Read-only operations stream through
+// FORWARD: Safe operations go directly to upstream
 // ══════════════════════════════════════════════════════════
 
 permit(
     principal,
-    action == ThoughtGate::Action::"StreamRaw",
+    action == ThoughtGate::Action::"Forward",
     resource
 ) when {
     resource.name.startsWith("get_") ||
@@ -731,21 +678,7 @@ permit(
 };
 
 // ══════════════════════════════════════════════════════════
-// AMBER PATH: Data operations need inspection
-// ══════════════════════════════════════════════════════════
-
-permit(
-    principal,
-    action == ThoughtGate::Action::"Inspect",
-    resource
-) when {
-    resource.name == "search_users" ||
-    resource.name == "export_data" ||
-    resource.name == "generate_report"
-};
-
-// ══════════════════════════════════════════════════════════
-// APPROVAL PATH: Dangerous operations need approval
+// APPROVE: Dangerous operations need human approval
 // ══════════════════════════════════════════════════════════
 
 permit(
@@ -773,12 +706,12 @@ permit(
 };
 
 // ══════════════════════════════════════════════════════════
-// ROLE OVERRIDES: Admins bypass approval
+// ROLE OVERRIDES: Admins can forward all operations
 // ══════════════════════════════════════════════════════════
 
 permit(
     principal in ThoughtGate::Role::"admin",
-    action == ThoughtGate::Action::"StreamRaw",
+    action == ThoughtGate::Action::"Forward",
     resource
 );
 ```
@@ -791,17 +724,16 @@ permit(
 - **❌ Logging policy details:** Don't expose policy rules in logs/errors
 - **❌ Hardcoded identity:** Always infer from environment
 
-## 11. Definition of Done
+## 11. Definition of Done (v0.1)
 
-- [ ] Cedar schema defined and documented
-- [ ] Policy evaluation (4-way) implemented
-- [ ] Post-approval re-evaluation implemented
+- [ ] Cedar schema defined and documented (Forward/Approve actions)
+- [ ] Policy evaluation (3-way: Forward/Approve/Reject) implemented
 - [ ] Policy loading with priority (ConfigMap → Env → Embedded)
 - [ ] Schema validation on load
 - [ ] Hot-reload with atomic swap
 - [ ] Identity inference (K8s + dev mode)
 - [ ] Audit logging for decisions
 - [ ] Metrics for evaluations and reloads
-- [ ] All edge cases (EC-POL-001 to EC-POL-016) covered
+- [ ] All edge cases (EC-POL-001 to EC-POL-013) covered
 - [ ] Performance target met (P99 < 1ms)
 - [ ] Example policies documented

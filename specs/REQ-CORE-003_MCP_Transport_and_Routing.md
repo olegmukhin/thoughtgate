@@ -26,27 +26,25 @@ This requirement defines the **entry point** for ThoughtGate—how MCP messages 
 └─────────────┘     └─────────────────────────────────────┘     └─────────────┘
 ```
 
-**Relationship to Green/Amber Paths:**
-ThoughtGate is an **MCP-specific gateway**, not a transparent HTTP proxy. All inbound MCP requests are necessarily "micro-buffered" for JSON-RPC parsing and routing—this is distinct from the streaming paths defined in REQ-CORE-001/002:
+**v0.1 Simplified Model:**
+ThoughtGate is an **MCP-specific gateway**, not a transparent HTTP proxy. All inbound MCP requests are parsed for JSON-RPC routing.
 
-| Traffic Type | Buffering | Path |
-|--------------|-----------|------|
-| Inbound MCP requests | Micro-buffered (JSON-RPC parsing) | This REQ |
-| Upstream responses (small) | Buffered for inspection | REQ-CORE-002 (Amber) |
-| Upstream responses (streaming) | Zero-copy passthrough | REQ-CORE-001 (Green) |
-| LLM token streams | Zero-copy passthrough | REQ-CORE-001 (Green) |
+| Traffic Type | Handling | Notes |
+|--------------|----------|-------|
+| Inbound MCP requests | Parse JSON-RPC, route by method | This REQ |
+| Upstream responses | Pass through | No inspection in v0.1 |
 
-The Green Path (REQ-CORE-001) applies to **upstream response streaming**, not inbound request handling. When an MCP server returns a large streaming response (e.g., LLM tokens), ThoughtGate streams it to the client without buffering.
+**v0.1 simplification:** Green Path (REQ-CORE-001) and Amber Path (REQ-CORE-002) are **deferred**. All responses are passed through without streaming or inspection distinction. These will be reintroduced when response inspection or LLM streaming is needed.
 
 ## 2. Dependencies
 
 | Requirement | Relationship | Notes |
 |-------------|--------------|-------|
-| REQ-CORE-001 | **Provides to** | Parsed requests for Green Path streaming |
-| REQ-CORE-002 | **Provides to** | Parsed requests for Amber Path buffering |
+| REQ-CORE-001 | **Deferred** | Green Path deferred to v0.2+ |
+| REQ-CORE-002 | **Deferred** | Amber Path deferred to v0.2+ |
 | REQ-CORE-004 | **Provides to** | Error responses formatted per this spec |
 | REQ-CORE-005 | **Coordinates with** | Lifecycle events (startup, shutdown) |
-| REQ-POL-001 | **Receives from** | Routing decisions (Green/Amber/Approval/Red) |
+| REQ-POL-001 | **Receives from** | Routing decisions (Forward/Approve/Reject) |
 | REQ-GOV-001 | **Provides to** | Task method handling (`tasks/*`) |
 
 ## 3. Intent
@@ -302,10 +300,10 @@ pub enum JsonRpcId {
 pub enum RouteTarget {
     /// Forward to policy engine for classification
     PolicyEvaluation { request: McpRequest },
-    
+
     /// Handle internally (tasks/* methods)
     TaskHandler { method: TaskMethod, request: McpRequest },
-    
+
     /// Forward directly to upstream (unknown methods)
     PassThrough { request: McpRequest },
 }
@@ -315,6 +313,16 @@ pub enum TaskMethod {
     Result,   // tasks/result
     List,     // tasks/list
     Cancel,   // tasks/cancel
+}
+
+/// v0.1 Simplified Policy Actions
+pub enum PolicyAction {
+    /// Forward request to upstream immediately
+    Forward,
+    /// Require approval before forwarding
+    Approve { timeout: Duration },
+    /// Reject request with error
+    Reject { reason: String },
 }
 ```
 

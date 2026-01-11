@@ -1,7 +1,20 @@
 //! Core proxy service implementation.
 //!
+//! # v0.1 Status: DEFERRED
+//!
+//! This module implements the Green Path (zero-copy streaming) which is **deferred**
+//! to v0.2+. In v0.1, requests are forwarded directly without streaming optimizations.
+//!
+//! The streaming infrastructure is retained for when LLM token streaming is needed.
+//!
+//! # When to Activate (v0.2+)
+//!
+//! - When streaming LLM responses (SSE token streams)
+//! - When large file transfers need zero-copy optimization
+//! - When response inspection during streaming is required
+//!
 //! # Traceability
-//! - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy)
+//! - Deferred: REQ-CORE-001 (Zero-Copy Peeking Strategy)
 
 use crate::config::ProxyConfig;
 use crate::error::{ProxyError, ProxyResult};

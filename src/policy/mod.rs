@@ -2,9 +2,16 @@
 //!
 //! Implements: REQ-POL-001 (Cedar Policy Engine)
 //!
-//! This module provides policy-based routing decisions for MCP requests,
-//! classifying them into Green (stream), Amber (inspect), Approval (HITL),
-//! or Red (deny) paths based on Cedar policies.
+//! # v0.1 Simplified Model
+//!
+//! The policy engine evaluates requests and returns one of three actions:
+//!
+//! - **Forward**: Send request directly to upstream
+//! - **Approve**: Require human approval before forwarding
+//! - **Reject**: Deny the request with an error
+//!
+//! This replaces the original 4-way classification (Green/Amber/Approval/Red).
+//! Green and Amber paths are deferred until response inspection or LLM streaming is needed.
 
 pub mod engine;
 pub mod loader;
@@ -13,28 +20,116 @@ pub mod principal;
 use std::time::Duration;
 use thiserror::Error;
 
-/// Policy decision for request routing.
+// ═══════════════════════════════════════════════════════════════════════════
+// v0.1 Simplified Policy Actions
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// v0.1 Simplified Policy Actions.
 ///
-/// Implements: REQ-POL-001/§6.2 (Policy Decision Output)
+/// The result of evaluating Cedar policies against an MCP request.
+/// This enum determines how the request is handled.
 ///
+/// # Evaluation Order
+///
+/// Policies are evaluated in this order:
+/// 1. `Forward` - If permitted, send immediately
+/// 2. `Approve` - If permitted, require human approval
+/// 3. (default) - If nothing permitted, reject
+///
+/// # Traceability
+/// - Implements: REQ-POL-001/§6.2 (Policy Action output)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyAction {
+    /// Forward request to upstream immediately.
+    ///
+    /// The request is sent to the MCP server without human approval.
+    /// Response is passed through directly to the agent.
+    Forward,
+
+    /// Require human approval before forwarding.
+    ///
+    /// In v0.1 blocking mode, the HTTP connection is held open until
+    /// approval is received via Slack. On approval, the request is
+    /// forwarded; on rejection or timeout, an error is returned.
+    Approve {
+        /// Timeout for the approval workflow.
+        /// After this duration, the request fails with ApprovalTimeout.
+        timeout: Duration,
+    },
+
+    /// Reject the request with a policy denial error.
+    ///
+    /// Returns JSON-RPC error code -32003 (PolicyDenied) to the agent.
+    Reject {
+        /// Reason for denial (safe for logging, not user-facing).
+        /// Does not expose policy internals.
+        reason: String,
+    },
+}
+
+impl PolicyAction {
+    /// Returns `true` if this action forwards the request immediately.
+    pub fn is_forward(&self) -> bool {
+        matches!(self, PolicyAction::Forward)
+    }
+
+    /// Returns `true` if this action requires approval.
+    pub fn is_approve(&self) -> bool {
+        matches!(self, PolicyAction::Approve { .. })
+    }
+
+    /// Returns `true` if this action rejects the request.
+    pub fn is_reject(&self) -> bool {
+        matches!(self, PolicyAction::Reject { .. })
+    }
+
+    /// Returns the approval timeout if this is an Approve action.
+    pub fn timeout(&self) -> Option<Duration> {
+        match self {
+            PolicyAction::Approve { timeout } => Some(*timeout),
+            _ => None,
+        }
+    }
+}
+
+impl Default for PolicyAction {
+    /// Default action is to reject (fail-closed).
+    ///
+    /// If no policy explicitly permits the action, it is denied.
+    fn default() -> Self {
+        PolicyAction::Reject {
+            reason: "No policy permits this action".to_string(),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Legacy 4-way Policy Decision - DEFERRED TO v0.2+
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Policy decision for request routing (4-way classification).
+///
+/// **v0.1 Status: DEFERRED** - Use `PolicyAction` instead for v0.1.
+///
+/// This enum is retained for v0.2+ when Green/Amber path distinction is needed.
 /// Each variant corresponds to one of the four traffic paths in ThoughtGate.
+///
+/// # Traceability
+/// - Deferred: REQ-POL-001/§6.2 (4-way Policy Decision Output)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDecision {
     /// Green Path: Stream through without buffering (zero-copy).
     ///
-    /// Implements: REQ-POL-001/F-001.1
-    /// Routes to: REQ-CORE-001 (Zero-Copy Streaming)
+    /// Deferred: REQ-CORE-001 (Zero-Copy Streaming)
     Green,
 
     /// Amber Path: Buffer and inspect before forwarding.
     ///
-    /// Implements: REQ-POL-001/F-001.2
-    /// Routes to: REQ-CORE-002 (Buffered Inspection)
+    /// Deferred: REQ-CORE-002 (Buffered Inspection)
     Amber,
 
     /// Approval Path: Require human/agent approval before proceeding.
     ///
-    /// Implements: REQ-POL-001/F-001.3
     /// Routes to: REQ-GOV-001/002/003 (Governance)
     Approval {
         /// Suggested timeout for approval decision
@@ -43,7 +138,6 @@ pub enum PolicyDecision {
 
     /// Red Path: Deny the request (policy violation).
     ///
-    /// Implements: REQ-POL-001/F-001.4
     /// Routes to: REQ-CORE-004 (Error Handling)
     Red {
         /// Reason for denial (safe for logging, not user-facing)
@@ -217,6 +311,51 @@ pub struct PolicyStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // v0.1 PolicyAction tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_forward_action() {
+        let action = PolicyAction::Forward;
+        assert!(action.is_forward());
+        assert!(!action.is_approve());
+        assert!(!action.is_reject());
+        assert_eq!(action.timeout(), None);
+    }
+
+    #[test]
+    fn test_approve_action() {
+        let action = PolicyAction::Approve {
+            timeout: Duration::from_secs(300),
+        };
+        assert!(!action.is_forward());
+        assert!(action.is_approve());
+        assert!(!action.is_reject());
+        assert_eq!(action.timeout(), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn test_reject_action() {
+        let action = PolicyAction::Reject {
+            reason: "Not permitted".to_string(),
+        };
+        assert!(!action.is_forward());
+        assert!(!action.is_approve());
+        assert!(action.is_reject());
+        assert_eq!(action.timeout(), None);
+    }
+
+    #[test]
+    fn test_default_is_reject() {
+        let action = PolicyAction::default();
+        assert!(action.is_reject());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Legacy PolicyDecision tests (retained for v0.2+)
+    // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
     fn test_policy_decision_variants() {

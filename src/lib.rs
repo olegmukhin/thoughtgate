@@ -3,14 +3,18 @@
 //! This library provides the core proxy service, error handling, and logging
 //! functionality for the ThoughtGate sidecar proxy.
 //!
-//! # Traffic Paths
+//! # v0.1 Traffic Model (Simplified)
 //!
-//! ThoughtGate implements four traffic paths based on policy decisions:
+//! Policy evaluates to ONE action:
 //!
-//! - **Green Path (REQ-CORE-001):** Zero-copy streaming for trusted traffic.
-//! - **Amber Path (REQ-CORE-002):** Buffered inspection for validation.
-//! - **Approval Path (REQ-GOV-001/002/003):** Human-in-the-loop approval.
-//! - **Red Path (REQ-CORE-004):** Policy-denied requests.
+//! | Action | Behavior |
+//! |--------|----------|
+//! | **Forward** | Send request to upstream immediately, pass response through |
+//! | **Approve** | Block until Slack approval, then forward |
+//! | **Reject** | Return JSON-RPC error immediately |
+//!
+//! All responses are passed through directly in v0.1. No inspection or streaming
+//! distinction is required for MCP JSON-RPC responses.
 //!
 //! # MCP Transport
 //!
@@ -19,11 +23,20 @@
 //! - MCP method routing (tools/*, tasks/*, resources/*, prompts/*)
 //! - Upstream forwarding with connection pooling
 //!
+//! # Deferred Capabilities (v0.2+)
+//!
+//! The following paths are implemented but **deferred** for v0.1:
+//!
+//! - **Green Path (REQ-CORE-001):** Zero-copy streaming for LLM token streams.
+//! - **Amber Path (REQ-CORE-002):** Buffered inspection for PII detection.
+//!
+//! These will be activated when response inspection or LLM streaming is needed.
+//!
 //! # Traceability
-//! - Implements: REQ-CORE-001 (Zero-Copy Peeking Strategy)
-//! - Implements: REQ-CORE-002 (Buffered Termination Strategy)
 //! - Implements: REQ-CORE-003 (MCP Transport & Routing)
-//! - Implements: REQ-POL-001 (Cedar Policy Engine)
+//! - Implements: REQ-POL-001 (Cedar Policy Engine - 3-way: Forward/Approve/Reject)
+//! - Deferred: REQ-CORE-001 (Zero-Copy Streaming)
+//! - Deferred: REQ-CORE-002 (Buffered Inspection)
 
 pub mod buffered_forwarder;
 pub mod config;

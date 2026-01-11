@@ -1,4 +1,4 @@
-// Default permissive policies for development
+// Default permissive policies for development (v0.1)
 //
 // Implements: REQ-POL-001/F-007 (Embedded Default Policy)
 //
@@ -8,21 +8,14 @@
 // For production, create custom policies in a ConfigMap or
 // set THOUGHTGATE_POLICIES environment variable.
 
-// Permit all StreamRaw actions (Green Path)
+// Permit all Forward actions (send to upstream immediately)
 permit(
     principal,
-    action == ThoughtGate::Action::"StreamRaw",
+    action == ThoughtGate::Action::"Forward",
     resource
 );
 
-// Permit all Inspect actions (Amber Path)
-permit(
-    principal,
-    action == ThoughtGate::Action::"Inspect",
-    resource
-);
-
-// Permit all Approve actions (Approval Path)
+// Permit all Approve actions (require human approval)
 permit(
     principal,
     action == ThoughtGate::Action::"Approve",

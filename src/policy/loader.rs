@@ -166,13 +166,13 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // Edge Case Tests (EC-POL-007, 008, 009)
+    // Edge Case Tests (EC-POL-004, 005, 006) - Policy Loading
     // ═══════════════════════════════════════════════════════════
 
-    /// EC-POL-007: ConfigMap exists → Load from ConfigMap
+    /// EC-POL-004: ConfigMap exists → Load from ConfigMap
     #[test]
     #[serial]
-    fn test_ec_pol_007_configmap_exists() {
+    fn test_ec_pol_004_configmap_exists() {
         use std::io::Write;
 
         // Create a temporary ConfigMap file
@@ -203,10 +203,10 @@ mod tests {
         let _ = fs::remove_file(&temp_path);
     }
 
-    /// EC-POL-008: ConfigMap missing, Env exists → Load from Env
+    /// EC-POL-005: ConfigMap missing, Env exists → Load from Env
     #[test]
     #[serial]
-    fn test_ec_pol_008_env_fallback() {
+    fn test_ec_pol_005_env_fallback() {
         unsafe {
             env::set_var("THOUGHTGATE_POLICY_FILE", "/nonexistent/path/policy.cedar");
             env::set_var(
@@ -225,10 +225,10 @@ mod tests {
         }
     }
 
-    /// EC-POL-009: Both ConfigMap and Env missing → Load embedded
+    /// EC-POL-006: Both ConfigMap and Env missing → Load embedded
     #[test]
     #[serial]
-    fn test_ec_pol_009_embedded_fallback() {
+    fn test_ec_pol_006_embedded_fallback() {
         unsafe {
             env::set_var("THOUGHTGATE_POLICY_FILE", "/nonexistent/path/policy.cedar");
             env::remove_var("THOUGHTGATE_POLICIES");
@@ -237,9 +237,8 @@ mod tests {
         let (policies, source) = load_policies();
         assert!(!policies.is_empty());
         assert!(matches!(source, PolicySource::Embedded));
-        // Verify it contains expected default policies
-        assert!(policies.contains("StreamRaw"));
-        assert!(policies.contains("Inspect"));
+        // Verify it contains expected v0.1 default policies
+        assert!(policies.contains("Forward"));
         assert!(policies.contains("Approve"));
 
         unsafe {
