@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1768147322697,
+  "lastUpdate": 1768150753400,
   "repoUrl": "https://github.com/olegmukhin/thoughtgate",
   "entries": {
     "Benchmark": [
@@ -339,6 +339,40 @@ window.BENCHMARK_DATA = {
           {
             "name": "ttfb/proxied/with_relay",
             "value": 11343962.458888888,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "oleg.v.mukhin@gmail.com",
+            "name": "Oleg Mukhin",
+            "username": "olegmukhin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b7d83e8386e03dc7dff563db4bdf31835b0071ad",
+          "message": "refactor: simplify v0.1 to 3-way policy model (Forward/Approve/Reject) (#17)\n\n* refactor: simplify v0.1 to 3-way policy model (Forward/Approve/Reject)\n\nReplace 4-way traffic classification (Green/Amber/Approval/Red) with\nsimplified 3-way policy actions for v0.1:\n\n- Forward: Send request to upstream immediately\n- Approve: Block until Slack approval, then forward\n- Reject: Return JSON-RPC error immediately\n\nKey changes:\n\nSpecs:\n- Mark REQ-CORE-001 (Green Path) and REQ-CORE-002 (Amber Path) as DEFERRED\n- Update REQ-POL-001 Cedar schema to use Forward/Approve actions only\n- Update REQ-CORE-003 routing to use PolicyAction enum\n- Simplify architecture.md diagrams and data flows\n\nCode:\n- Add src/policy.rs with PolicyAction enum\n- Mark proxy_service.rs (Green Path streaming) as deferred\n- Mark buffered_forwarder.rs (Amber Path inspection) as deferred\n- Mark inspector.rs framework as deferred\n- Update error types and config with v0.1 status notes\n- Update lib.rs module docs with simplified traffic model\n\nThe Green/Amber path infrastructure is retained for v0.2+ when response\ninspection or LLM streaming is needed. All responses pass through\ndirectly in v0.1 without inspection.\n\n* docs(spec): update REQ-POL-001 implementation reference to v0.1 model\n\nUpdate the Cedar Engine Implementation section to match the actual v0.1\nimplementation:\n- Return PolicyAction (Forward/Approve/Reject) instead of PolicyDecision\n- Check Forward → Approve actions instead of StreamRaw/Inspect/Approve\n- Remove stale action_to_decision() helper showing 4-way logic\n\nThis fixes a documentation inconsistency where the spec defined v0.1\nactions but the implementation reference showed the old 4-way model.\n\nImplements: REQ-POL-001",
+          "timestamp": "2026-01-11T16:56:58Z",
+          "tree_id": "9915f5367a2fff6efb779ce955a2c6ef135a2d48",
+          "url": "https://github.com/olegmukhin/thoughtgate/commit/b7d83e8386e03dc7dff563db4bdf31835b0071ad"
+        },
+        "date": 1768150752938,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ttfb/direct/baseline",
+            "value": 131134.31803748145,
+            "unit": "ns"
+          },
+          {
+            "name": "ttfb/proxied/with_relay",
+            "value": 11357475.02,
             "unit": "ns"
           }
         ]
