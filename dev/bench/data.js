@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1768167185434,
+  "lastUpdate": 1768172472879,
   "repoUrl": "https://github.com/olegmukhin/thoughtgate",
   "entries": {
     "Benchmark": [
@@ -475,6 +475,40 @@ window.BENCHMARK_DATA = {
           {
             "name": "ttfb/proxied/with_relay",
             "value": 11356819.873333333,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "oleg.v.mukhin@gmail.com",
+            "name": "Oleg Mukhin",
+            "username": "olegmukhin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "dd1b70545e15f6fd7b8b4a89bcf67bca053ef8ef",
+          "message": "feat(lifecycle): implement REQ-CORE-005 Operational Lifecycle (#21)\n\n* feat(lifecycle): implement REQ-CORE-005 Operational Lifecycle\n\nAdd comprehensive lifecycle management for ThoughtGate including:\n\n- LifecycleManager with state machine (Starting → Ready → ShuttingDown → Stopped)\n- Request tracking with RAII guard pattern for proper shutdown draining\n- Health endpoints (/health, /ready) for Kubernetes probes\n- Graceful shutdown with configurable drain timeout\n- Upstream health check for readiness probes\n\nKey components:\n- src/lifecycle/mod.rs: Core LifecycleManager, RequestGuard, DrainResult\n- src/lifecycle/health.rs: Axum health/ready handlers with JSON responses\n- UpstreamClient.health_check(): TCP connectivity verification\n\nEnvironment variables:\n- THOUGHTGATE_SHUTDOWN_TIMEOUT_SECS (default: 30)\n- THOUGHTGATE_DRAIN_TIMEOUT_SECS (default: 25)\n- THOUGHTGATE_STARTUP_TIMEOUT_SECS (default: 15)\n- THOUGHTGATE_REQUIRE_UPSTREAM_AT_STARTUP (default: false)\n- THOUGHTGATE_UPSTREAM_HEALTH_INTERVAL_SECS (default: 30)\n\nImplements: REQ-CORE-005\nRefs: specs/REQ-CORE-005_Operational_Lifecycle.md\n\n* fix(lifecycle): address code review findings for REQ-CORE-005\n\n- Use config.connect_timeout in health_check() for consistency\n- Log warnings when env var parsing fails instead of silent fallback\n- Remove redundant clone of ReadinessChecks in response handler\n\n* fix(lifecycle): address code review findings for REQ-CORE-005\n\n- Replace std::process::exit(1) with error return for proper cleanup\n- Use main server bind address for health endpoint (security fix)\n- Add port overflow validation for health port (65535 edge case)\n- Add TODO comments for unused config fields (startup_timeout, etc.)\n- Validate drain_timeout < shutdown_timeout with auto-adjustment\n- Log warnings when falling back to defaults in health_check\n\n* fix(lifecycle): additional robustness improvements\n\n- Return error instead of falling back to localhost for missing host\n- Enforce minimum drain_timeout of 1 second to prevent zero-drain edge case\n- Include lifecycle state in readiness reason when checks pass but not ready",
+          "timestamp": "2026-01-11T22:58:40Z",
+          "tree_id": "befb20f697752b82f876e94dc11e4edc9f8afacd",
+          "url": "https://github.com/olegmukhin/thoughtgate/commit/dd1b70545e15f6fd7b8b4a89bcf67bca053ef8ef"
+        },
+        "date": 1768172472475,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ttfb/direct/baseline",
+            "value": 141256.02671875834,
+            "unit": "ns"
+          },
+          {
+            "name": "ttfb/proxied/with_relay",
+            "value": 11360005.077777779,
             "unit": "ns"
           }
         ]
