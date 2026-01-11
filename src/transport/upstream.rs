@@ -21,6 +21,7 @@
 //! # Security
 //!
 //! - TLS certificate verification is enabled by default
+//! - TLS 1.2+ enforced by rustls (no TLS 1.0/1.1 support, preventing downgrade attacks)
 //! - No automatic retry (prevents duplicate side effects)
 
 use std::time::Duration;
@@ -245,7 +246,11 @@ impl UpstreamClient {
                 correlation_id = %correlation_id,
                 "Upstream returned 204 No Content (notification acknowledged)"
             );
-            // Return a synthetic success response for notifications
+            // Return a synthetic success response for internal processing.
+            // Note: For notifications, request.id is None per JSON-RPC 2.0 spec.
+            // This synthetic response is only used internally by the routing layer
+            // and is NOT sent to the client (server.rs checks is_notification() and
+            // returns 204 No Content to the client without a response body).
             return Ok(JsonRpcResponse::success(
                 request.id.clone(),
                 serde_json::Value::Null,
@@ -331,6 +336,17 @@ impl UpstreamClient {
             .map_err(|e| self.classify_error(e, "batch"))?;
 
         let status = response.status();
+
+        // Handle 204 No Content (all requests were notifications)
+        if status == reqwest::StatusCode::NO_CONTENT {
+            debug!(
+                batch_size = requests.len(),
+                "Upstream returned 204 No Content (all notifications acknowledged)"
+            );
+            // Return empty response array - no responses expected for notification-only batches
+            return Ok(Vec::new());
+        }
+
         if !status.is_success() {
             return Err(ThoughtGateError::UpstreamError {
                 code: -32002,

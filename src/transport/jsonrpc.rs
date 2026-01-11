@@ -617,6 +617,33 @@ mod tests {
         }
     }
 
+    /// Verifies TTL clamping to MAX_TTL_MS (24 hours)
+    #[test]
+    fn test_ttl_clamped_to_max() {
+        // TTL of 48 hours (exceeds 24 hour max)
+        let excessive_ttl = 48 * 60 * 60 * 1000u64; // 48 hours in ms
+        let json = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"task":{{"ttl":{}}}}}}}"#,
+            excessive_ttl
+        );
+        let result = parse_jsonrpc(json.as_bytes());
+
+        if let Ok(ParsedRequests::Single(req)) = result {
+            assert!(req.is_task_augmented());
+            let metadata = req.task_metadata.expect("should have metadata");
+            // TTL should be clamped to MAX_TTL_MS (24 hours)
+            let expected_max = std::time::Duration::from_millis(MAX_TTL_MS);
+            assert_eq!(metadata.ttl, Some(expected_max));
+            // Verify it's not the excessive value
+            assert_ne!(
+                metadata.ttl,
+                Some(std::time::Duration::from_millis(excessive_ttl))
+            );
+        } else {
+            panic!("Expected task-augmented request");
+        }
+    }
+
     #[test]
     fn test_invalid_jsonrpc_version() {
         let json = br#"{"jsonrpc":"1.0","id":1,"method":"test"}"#;
