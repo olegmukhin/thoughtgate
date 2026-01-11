@@ -381,6 +381,7 @@ impl CedarEngine {
 mod tests {
     use super::*;
     use crate::policy::{ApprovalGrant, PolicyContext, Principal};
+    use serial_test::serial;
 
     fn test_principal() -> Principal {
         Principal {
@@ -444,6 +445,7 @@ mod tests {
 
     /// EC-POL-001: StreamRaw permitted → Return Green
     #[test]
+    #[serial]
     fn test_ec_pol_001_streamraw_permitted() {
         // Create engine with custom policy that only permits StreamRaw
         let policy_str = r#"
@@ -476,6 +478,7 @@ mod tests {
 
     /// EC-POL-002: Only Inspect permitted → Return Amber
     #[test]
+    #[serial]
     fn test_ec_pol_002_inspect_only() {
         let policy_str = r#"
             permit(
@@ -507,6 +510,7 @@ mod tests {
 
     /// EC-POL-003: Only Approve permitted → Return Approval
     #[test]
+    #[serial]
     fn test_ec_pol_003_approve_only() {
         let policy_str = r#"
             permit(
@@ -538,6 +542,7 @@ mod tests {
 
     /// EC-POL-004: No action permitted → Return Red
     #[test]
+    #[serial]
     fn test_ec_pol_004_no_action_permitted() {
         let policy_str = r#"
             // Permit a different principal, not test-app
@@ -570,6 +575,7 @@ mod tests {
 
     /// EC-POL-005: Post-approval, still permitted → Return Amber
     #[test]
+    #[serial]
     fn test_ec_pol_005_post_approval_permitted() {
         // Policy permits StreamRaw
         let policy_str = r#"
@@ -610,6 +616,7 @@ mod tests {
 
     /// EC-POL-006: Post-approval, now denied → Return Red (policy drift)
     #[test]
+    #[serial]
     fn test_ec_pol_006_post_approval_denied() {
         // Policy denies everything for test-app
         let policy_str = r#"
@@ -654,6 +661,7 @@ mod tests {
 
     /// EC-POL-010: Invalid policy syntax → Keep old policies
     #[test]
+    #[serial]
     fn test_ec_pol_010_invalid_syntax() {
         // First create engine with valid policies
         let valid_policy = r#"
@@ -692,6 +700,7 @@ mod tests {
 
     /// EC-POL-011: Schema violation → Keep old policies
     #[test]
+    #[serial]
     fn test_ec_pol_011_schema_violation() {
         // First create engine with valid policies
         let valid_policy = r#"
@@ -735,6 +744,7 @@ mod tests {
 
     /// EC-POL-012: Policy reload → Statistics updated
     #[test]
+    #[serial]
     fn test_ec_pol_012_reload_updates_stats() {
         unsafe {
             std::env::set_var(

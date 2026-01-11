@@ -110,8 +110,10 @@ fn embedded_schema() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_load_policies_embedded() {
         // Clear env vars to ensure embedded is used
         unsafe {
@@ -125,6 +127,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_load_policies_from_env() {
         unsafe {
             env::set_var(
@@ -168,6 +171,7 @@ mod tests {
 
     /// EC-POL-007: ConfigMap exists → Load from ConfigMap
     #[test]
+    #[serial]
     fn test_ec_pol_007_configmap_exists() {
         use std::io::Write;
 
@@ -201,6 +205,7 @@ mod tests {
 
     /// EC-POL-008: ConfigMap missing, Env exists → Load from Env
     #[test]
+    #[serial]
     fn test_ec_pol_008_env_fallback() {
         unsafe {
             env::set_var("THOUGHTGATE_POLICY_FILE", "/nonexistent/path/policy.cedar");
@@ -222,6 +227,7 @@ mod tests {
 
     /// EC-POL-009: Both ConfigMap and Env missing → Load embedded
     #[test]
+    #[serial]
     fn test_ec_pol_009_embedded_fallback() {
         unsafe {
             env::set_var("THOUGHTGATE_POLICY_FILE", "/nonexistent/path/policy.cedar");

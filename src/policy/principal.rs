@@ -143,8 +143,10 @@ fn extract_sa_from_json(json: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_dev_mode_principal() {
         // Clear any env vars from other tests
         unsafe {
@@ -160,6 +162,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_dev_mode_with_overrides() {
         // Using unsafe blocks for test env var manipulation
         unsafe {
@@ -200,6 +203,7 @@ mod tests {
     /// Note: This test verifies dev mode override. Full K8s ServiceAccount testing
     /// requires integration tests with actual K8s mounts or mocked file system.
     #[test]
+    #[serial]
     fn test_ec_pol_013_k8s_identity_structure() {
         // This test verifies the structure using dev mode
         // Full integration test should be in tests/integration_k8s.rs
@@ -225,6 +229,7 @@ mod tests {
 
     /// EC-POL-014: K8s identity missing, dev mode → Use dev principal
     #[test]
+    #[serial]
     fn test_ec_pol_014_dev_mode_fallback() {
         unsafe {
             env::set_var("THOUGHTGATE_DEV_MODE", "true");
@@ -250,6 +255,7 @@ mod tests {
 
     /// EC-POL-015: K8s identity missing, no dev mode → Fail startup
     #[test]
+    #[serial]
     fn test_ec_pol_015_no_identity_fails() {
         unsafe {
             env::remove_var("THOUGHTGATE_DEV_MODE");
