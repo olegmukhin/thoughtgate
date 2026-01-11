@@ -375,12 +375,15 @@ async fn handle_batch_request(state: &AppState, requests: Vec<McpRequest>) -> Re
             json,
         )
             .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            [(header::CONTENT_TYPE, "application/json")],
-            "[]",
-        )
-            .into_response(),
+        Err(e) => {
+            error!(error = %e, "Failed to serialize batch response");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error: failed to serialize response"}}"#,
+            )
+                .into_response()
+        }
     }
 }
 

@@ -73,22 +73,37 @@ impl UpstreamConfig {
     ///
     /// # Errors
     ///
-    /// Returns `ThoughtGateError::InvalidParams` if `THOUGHTGATE_UPSTREAM` is not set.
+    /// Returns `ThoughtGateError::InvalidParams` if:
+    /// - `THOUGHTGATE_UPSTREAM` is not set
+    /// - `THOUGHTGATE_REQUEST_TIMEOUT_SECS` is set but not a valid u64
+    /// - `THOUGHTGATE_UPSTREAM_CONNECT_TIMEOUT_SECS` is set but not a valid u64
     pub fn from_env() -> Result<Self, ThoughtGateError> {
         let base_url =
             std::env::var("THOUGHTGATE_UPSTREAM").map_err(|_| ThoughtGateError::InvalidParams {
                 details: "THOUGHTGATE_UPSTREAM environment variable is required".to_string(),
             })?;
 
-        let timeout_secs: u64 = std::env::var("THOUGHTGATE_REQUEST_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30);
+        let timeout_secs: u64 = match std::env::var("THOUGHTGATE_REQUEST_TIMEOUT_SECS") {
+            Ok(val) => val.parse().map_err(|_| ThoughtGateError::InvalidParams {
+                details: format!(
+                    "THOUGHTGATE_REQUEST_TIMEOUT_SECS must be a valid integer, got: '{}'",
+                    val
+                ),
+            })?,
+            Err(_) => 30, // Default when not set
+        };
 
-        let connect_timeout_secs: u64 = std::env::var("THOUGHTGATE_UPSTREAM_CONNECT_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(5);
+        let connect_timeout_secs: u64 = match std::env::var(
+            "THOUGHTGATE_UPSTREAM_CONNECT_TIMEOUT_SECS",
+        ) {
+            Ok(val) => val.parse().map_err(|_| ThoughtGateError::InvalidParams {
+                details: format!(
+                    "THOUGHTGATE_UPSTREAM_CONNECT_TIMEOUT_SECS must be a valid integer, got: '{}'",
+                    val
+                ),
+            })?,
+            Err(_) => 5, // Default when not set
+        };
 
         Ok(Self {
             base_url,
@@ -101,6 +116,8 @@ impl UpstreamConfig {
     /// Create a new config with the specified base URL.
     ///
     /// Uses default values for all other settings.
+    ///
+    /// Implements: REQ-CORE-003/§5.3 (Configuration)
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
@@ -135,8 +152,27 @@ impl UpstreamClient {
     ///
     /// # Errors
     ///
-    /// Returns `ThoughtGateError::InternalError` if the client cannot be built.
+    /// Returns `ThoughtGateError::InternalError` if:
+    /// - The base_url is empty or not a valid absolute URL
+    /// - The HTTP client cannot be built
     pub fn new(config: UpstreamConfig) -> Result<Self, ThoughtGateError> {
+        // Validate base_url is non-empty and parseable
+        if config.base_url.is_empty() {
+            return Err(ThoughtGateError::InternalError {
+                correlation_id: "upstream-client-config-error: base_url is empty".to_string(),
+            });
+        }
+
+        // Validate URL is parseable (reqwest uses url::Url internally)
+        if let Err(e) = reqwest::Url::parse(&config.base_url) {
+            return Err(ThoughtGateError::InternalError {
+                correlation_id: format!(
+                    "upstream-client-config-error: invalid base_url '{}': {}",
+                    config.base_url, e
+                ),
+            });
+        }
+
         let client = Client::builder()
             .timeout(config.timeout)
             .connect_timeout(config.connect_timeout)
@@ -202,6 +238,20 @@ impl UpstreamClient {
 
         // Check HTTP status
         let status = response.status();
+
+        // Handle 204 No Content (notification response from upstream)
+        if status == reqwest::StatusCode::NO_CONTENT {
+            debug!(
+                correlation_id = %correlation_id,
+                "Upstream returned 204 No Content (notification acknowledged)"
+            );
+            // Return a synthetic success response for notifications
+            return Ok(JsonRpcResponse::success(
+                request.id.clone(),
+                serde_json::Value::Null,
+            ));
+        }
+
         if !status.is_success() {
             warn!(
                 correlation_id = %correlation_id,
@@ -209,7 +259,7 @@ impl UpstreamClient {
                 "Upstream returned error status"
             );
             return Err(ThoughtGateError::UpstreamError {
-                code: status.as_u16() as i32,
+                code: -32002,
                 message: format!("Upstream returned HTTP {}", status),
             });
         }
@@ -242,16 +292,24 @@ impl UpstreamClient {
     ///
     /// # Arguments
     ///
-    /// * `requests` - The MCP requests to forward as a batch
+    /// * `requests` - The MCP requests to forward as a batch (must be non-empty)
     ///
     /// # Returns
     ///
     /// * `Ok(Vec<JsonRpcResponse>)` - Responses from upstream
+    /// * `Err(ThoughtGateError::InvalidRequest)` - If the batch is empty
     /// * `Err(ThoughtGateError)` - If the batch request failed
     pub async fn forward_batch(
         &self,
         requests: &[McpRequest],
     ) -> Result<Vec<JsonRpcResponse>, ThoughtGateError> {
+        // Reject empty batches - don't send [] to upstream
+        if requests.is_empty() {
+            return Err(ThoughtGateError::InvalidRequest {
+                details: "Empty batch requests are invalid".to_string(),
+            });
+        }
+
         let url = format!("{}/mcp/v1", self.config.base_url.trim_end_matches('/'));
 
         debug!(
@@ -275,7 +333,7 @@ impl UpstreamClient {
         let status = response.status();
         if !status.is_success() {
             return Err(ThoughtGateError::UpstreamError {
-                code: status.as_u16() as i32,
+                code: -32002,
                 message: format!("Upstream returned HTTP {}", status),
             });
         }
@@ -348,12 +406,18 @@ impl UpstreamClient {
 ///
 /// This trait abstracts the upstream forwarding behavior, allowing tests
 /// to inject mock implementations without making actual HTTP requests.
+///
+/// Implements: REQ-CORE-003/F-004 (Upstream Forwarding)
 #[async_trait::async_trait]
 pub trait UpstreamForwarder: Send + Sync {
     /// Forward a single request to upstream.
+    ///
+    /// Implements: REQ-CORE-003/F-004.4 (Return upstream response)
     async fn forward(&self, request: &McpRequest) -> Result<JsonRpcResponse, ThoughtGateError>;
 
     /// Forward a batch of requests to upstream.
+    ///
+    /// Implements: REQ-CORE-003/F-007 (Batch Request Handling)
     async fn forward_batch(
         &self,
         requests: &[McpRequest],
@@ -377,6 +441,36 @@ impl UpstreamForwarder for UpstreamClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    /// RAII guard for env var tests that saves and restores env var state.
+    struct EnvVarGuard {
+        vars: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvVarGuard {
+        fn new(var_names: &[&'static str]) -> Self {
+            let vars = var_names
+                .iter()
+                .map(|&name| (name, std::env::var(name).ok()))
+                .collect();
+            Self { vars }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (name, original) in &self.vars {
+                // SAFETY: We're in a single-threaded test context (enforced by #[serial])
+                unsafe {
+                    match original {
+                        Some(val) => std::env::set_var(name, val),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_default_config() {
@@ -402,15 +496,36 @@ mod tests {
         assert!(client.is_ok());
     }
 
-    // Note: These env var tests use unsafe because std::env::set_var/remove_var
-    // can cause data races in multi-threaded programs. In tests, this is acceptable
-    // when tests run serially (cargo test runs each test in sequence by default
-    // for the same crate). For true isolation, consider `serial_test` crate or
-    // test-specific env var prefixes.
+    #[test]
+    fn test_upstream_client_empty_url() {
+        let config = UpstreamConfig::default(); // Empty base_url
+        let result = UpstreamClient::new(config);
+        assert!(matches!(
+            result,
+            Err(ThoughtGateError::InternalError { .. })
+        ));
+    }
 
     #[test]
+    fn test_upstream_client_invalid_url() {
+        let config = UpstreamConfig::with_base_url("not-a-valid-url");
+        let result = UpstreamClient::new(config);
+        assert!(matches!(
+            result,
+            Err(ThoughtGateError::InternalError { .. })
+        ));
+    }
+
+    #[test]
+    #[serial]
     fn test_config_from_env_missing_upstream() {
-        // SAFETY: Test runs in single-threaded context, env var mutation is isolated
+        let _guard = EnvVarGuard::new(&[
+            "THOUGHTGATE_UPSTREAM",
+            "THOUGHTGATE_REQUEST_TIMEOUT_SECS",
+            "THOUGHTGATE_UPSTREAM_CONNECT_TIMEOUT_SECS",
+        ]);
+
+        // SAFETY: Test runs serially via #[serial], env var mutation is isolated
         unsafe {
             std::env::remove_var("THOUGHTGATE_UPSTREAM");
         }
@@ -423,8 +538,15 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_from_env_with_upstream() {
-        // SAFETY: Test runs in single-threaded context, env var mutation is isolated
+        let _guard = EnvVarGuard::new(&[
+            "THOUGHTGATE_UPSTREAM",
+            "THOUGHTGATE_REQUEST_TIMEOUT_SECS",
+            "THOUGHTGATE_UPSTREAM_CONNECT_TIMEOUT_SECS",
+        ]);
+
+        // SAFETY: Test runs serially via #[serial], env var mutation is isolated
         unsafe {
             std::env::set_var("THOUGHTGATE_UPSTREAM", "http://test:3000");
             std::env::set_var("THOUGHTGATE_REQUEST_TIMEOUT_SECS", "60");
@@ -438,12 +560,58 @@ mod tests {
         assert_eq!(config.base_url, "http://test:3000");
         assert_eq!(config.timeout, Duration::from_secs(60));
         assert_eq!(config.connect_timeout, Duration::from_secs(10));
+        // EnvVarGuard restores original values on drop
+    }
 
-        // SAFETY: Cleanup env vars set above
+    #[test]
+    #[serial]
+    fn test_config_from_env_invalid_timeout() {
+        let _guard = EnvVarGuard::new(&[
+            "THOUGHTGATE_UPSTREAM",
+            "THOUGHTGATE_REQUEST_TIMEOUT_SECS",
+            "THOUGHTGATE_UPSTREAM_CONNECT_TIMEOUT_SECS",
+        ]);
+
+        // SAFETY: Test runs serially via #[serial], env var mutation is isolated
         unsafe {
-            std::env::remove_var("THOUGHTGATE_UPSTREAM");
-            std::env::remove_var("THOUGHTGATE_REQUEST_TIMEOUT_SECS");
-            std::env::remove_var("THOUGHTGATE_UPSTREAM_CONNECT_TIMEOUT_SECS");
+            std::env::set_var("THOUGHTGATE_UPSTREAM", "http://test:3000");
+            std::env::set_var("THOUGHTGATE_REQUEST_TIMEOUT_SECS", "not-a-number");
+        }
+
+        let result = UpstreamConfig::from_env();
+        assert!(matches!(
+            result,
+            Err(ThoughtGateError::InvalidParams { .. })
+        ));
+        if let Err(ThoughtGateError::InvalidParams { details }) = result {
+            assert!(details.contains("THOUGHTGATE_REQUEST_TIMEOUT_SECS"));
+            assert!(details.contains("not-a-number"));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_from_env_invalid_connect_timeout() {
+        let _guard = EnvVarGuard::new(&[
+            "THOUGHTGATE_UPSTREAM",
+            "THOUGHTGATE_REQUEST_TIMEOUT_SECS",
+            "THOUGHTGATE_UPSTREAM_CONNECT_TIMEOUT_SECS",
+        ]);
+
+        // SAFETY: Test runs serially via #[serial], env var mutation is isolated
+        unsafe {
+            std::env::set_var("THOUGHTGATE_UPSTREAM", "http://test:3000");
+            std::env::set_var("THOUGHTGATE_UPSTREAM_CONNECT_TIMEOUT_SECS", "invalid");
+        }
+
+        let result = UpstreamConfig::from_env();
+        assert!(matches!(
+            result,
+            Err(ThoughtGateError::InvalidParams { .. })
+        ));
+        if let Err(ThoughtGateError::InvalidParams { details }) = result {
+            assert!(details.contains("THOUGHTGATE_UPSTREAM_CONNECT_TIMEOUT_SECS"));
+            assert!(details.contains("invalid"));
         }
     }
 }
