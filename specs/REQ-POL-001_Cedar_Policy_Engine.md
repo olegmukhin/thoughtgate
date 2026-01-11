@@ -613,7 +613,7 @@ policy_source{source="configmap|env|embedded"}
 
 ## 10. Implementation Reference
 
-### Cedar Engine Implementation
+### Cedar Engine Implementation (v0.1)
 
 ```rust
 pub struct CedarEngine {
@@ -621,57 +621,39 @@ pub struct CedarEngine {
     policies: ArcSwap<PolicySet>,
     schema: Schema,
     principal: Principal,
-    config: PolicyConfig,
 }
 
 impl CedarEngine {
-    pub fn evaluate(&self, request: &PolicyRequest) -> PolicyDecision {
+    /// Evaluate a policy request.
+    ///
+    /// # Decision Logic (v0.1)
+    /// Check Forward → Approve → Reject
+    ///
+    /// # Returns
+    /// - `PolicyAction::Forward` if Forward action is permitted
+    /// - `PolicyAction::Approve` if only Approve action is permitted
+    /// - `PolicyAction::Reject` if no action is permitted
+    pub fn evaluate(&self, request: &PolicyRequest) -> PolicyAction {
         let policies = self.policies.load();
-        
-        let cedar_request = self.build_cedar_request(request);
-        
-        // Check actions in priority order
-        let actions = if request.context.approval_grant.is_some() {
-            // Post-approval: any permit means Amber
-            vec![Action::StreamRaw, Action::Inspect, Action::Approve]
-        } else {
-            // Initial: check in order
-            vec![Action::StreamRaw, Action::Inspect, Action::Approve]
-        };
-        
-        for action in &actions {
-            let response = self.authorizer.is_authorized(
-                &cedar_request.with_action(action),
-                &policies,
-                &self.entities,
-            );
-            
-            if response.decision() == Decision::Allow {
-                return self.action_to_decision(action, request);
+
+        // v0.1: Check actions in priority order: Forward → Approve
+        let actions = ["Forward", "Approve"];
+
+        for action_name in &actions {
+            if self.is_action_permitted(request, action_name, &policies) {
+                return match *action_name {
+                    "Forward" => PolicyAction::Forward,
+                    "Approve" => PolicyAction::Approve {
+                        timeout: Duration::from_secs(300), // Default 5 minutes
+                    },
+                    _ => unreachable!(),
+                };
             }
         }
-        
-        PolicyDecision::Red {
-            reason: "No policy permits this request".into(),
-        }
-    }
-    
-    fn action_to_decision(
-        &self,
-        action: &Action,
-        request: &PolicyRequest,
-    ) -> PolicyDecision {
-        // Post-approval always returns Amber (already buffered)
-        if request.context.approval_grant.is_some() {
-            return PolicyDecision::Amber;
-        }
-        
-        match action {
-            Action::StreamRaw => PolicyDecision::Green,
-            Action::Inspect => PolicyDecision::Amber,
-            Action::Approve => PolicyDecision::Approval {
-                timeout: Duration::from_secs(600),
-            },
+
+        // No action permitted - Reject
+        PolicyAction::Reject {
+            reason: "No policy permits this request".to_string(),
         }
     }
 }
