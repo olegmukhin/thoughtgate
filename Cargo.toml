@@ -45,11 +45,16 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Error handling
 thiserror = "2"
-uuid = { version = "1.19", features = ["v4"] }
+uuid = { version = "1.19", features = ["v4", "serde"] }
 
 # Policy engine (REQ-POL-001)
 cedar-policy = "4.8.0"
 arc-swap = "1.8.0"
+
+# Task lifecycle (REQ-GOV-001)
+dashmap = "6"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+sha2 = "0.10"
 
 # Async trait support (REQ-CORE-002 Inspector interface)
 async-trait = "0.1"
@@ -122,4 +127,3 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-
