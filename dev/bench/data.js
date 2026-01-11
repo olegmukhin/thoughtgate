@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1768088400655,
+  "lastUpdate": 1768095900641,
   "repoUrl": "https://github.com/olegmukhin/thoughtgate",
   "entries": {
     "Benchmark": [
@@ -271,6 +271,40 @@ window.BENCHMARK_DATA = {
           {
             "name": "ttfb/proxied/with_relay",
             "value": 11354554.626666663,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "oleg.v.mukhin@gmail.com",
+            "name": "Oleg Mukhin",
+            "username": "olegmukhin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0eef9941219be80be9975cb21e2fc975ce520e3d",
+          "message": "feat(policy): implement Cedar policy engine (#15)\n\n* feat(policy): implement Cedar policy engine\n\nImplement comprehensive Cedar policy engine with 4-way traffic\nclassification (Green/Amber/Approval/Red paths) based on declarative\npolicies.\n\nKey features:\n- Policy evaluation with action priority (StreamRaw → Inspect → Approve)\n- Post-approval re-evaluation with policy drift detection\n- Policy loading priority: ConfigMap → Environment → Embedded defaults\n- Hot-reload with atomic swap (arc-swap) for zero-downtime updates\n- K8s identity inference from ServiceAccount mounts\n- Schema validation for all policies\n- Development mode override for local testing\n\nTechnical implementation:\n- Uses cedar-policy crate for sub-millisecond policy evaluation\n- Lock-free hot-reload using arc_swap::ArcSwap\n- Best-effort JWT parsing for ServiceAccount name extraction\n- Comprehensive error types (ParseError, SchemaValidation, IdentityError)\n- 31 unit tests covering all 16 edge cases (EC-POL-001 to EC-POL-016)\n\nFiles:\n- src/policy/mod.rs: Core types and public API\n- src/policy/engine.rs: Cedar engine with evaluate() and reload()\n- src/policy/loader.rs: Policy loading with fallback chain\n- src/policy/principal.rs: K8s identity inference\n- src/policy/schema.cedarschema: Cedar schema definition\n- src/policy/defaults.cedar: Embedded permissive policies for dev\n\nImplements: REQ-POL-001\nRefs: specs/REQ-POL-001_Cedar_Policy_Engine.md\n\n* chore(policy): update deps and add serial test annotations\n\nUpdate policy engine dependencies to latest stable versions:\n- cedar-policy: 4.2 → 4.8.0 (actual: 4.8.2)\n- arc-swap: 1.7 → 1.8.0\n\nAdd serial_test annotations to prevent race conditions in tests\nthat mutate global environment variables. Tests with #[serial]\nexecute sequentially, while pure-read tests remain parallel.\n\nFiles updated:\n- src/policy/engine.rs: 9 tests annotated with #[serial]\n- src/policy/loader.rs: 5 tests annotated with #[serial]\n- src/policy/principal.rs: 5 tests annotated with #[serial]\n\nVerified:\n- All 31 policy tests passing without --test-threads=1\n- cargo clippy clean (no warnings)\n- cargo build successful\n- No API changes required in existing code\n\n* fix(policy): add entity attributes, strict dev mode, and last_reload tracking\n\nFix critical issues in Cedar policy engine:\n\n1. Add principal entity attributes to Cedar evaluation\n   - Build entities with namespace, service_account, and roles\n   - Enables policies to match on principal.namespace and role hierarchy\n   - Previously used Entities::empty() causing silent policy failures\n\n2. Fix dev mode check to require explicit \"true\" value\n   - Changed from .is_ok() to .as_deref() == Ok(\"true\")\n   - Prevents accidental dev mode activation from THOUGHTGATE_DEV_MODE=false\n   - Security fix: operators can now safely disable dev mode\n\n3. Track last_reload timestamp in PolicyStats\n   - Add arc_swap::ArcSwap<Option<SystemTime>> to Stats struct\n   - Update timestamp on successful reload\n   - Improves observability for policy hot-reload operations\n\n4. Add serial test annotations for env-dependent tests\n   - Mark test_engine_creation, test_evaluate_with_default_policies,\n     test_stats with #[serial] to prevent race conditions\n\nTesting:\n- Added test_dev_mode_requires_true to verify strict checking\n- All 32 policy tests passing\n- cargo clippy clean\n\nFixes issues that would cause:\n- Policies using principal attributes to silently fail\n- Unintended dev mode activation (security vulnerability)\n- Missing observability data for policy reloads\n\n* Revert Cedar entity building to fix CI test failures\n\nReverts the build_entities() implementation that was causing 6 policy\nengine tests to fail in CI. The entity-building code had several issues:\n\n1. Role entities were created without required \"name\" attribute\n2. Resource entities were missing from entity store\n3. Cedar schema validation became stricter with entities present\n\nRoot cause: When entities are provided to Cedar's authorizer, it\nvalidates them against the schema. The incomplete entity construction\ncaused validation failures that manifested as policy denials.\n\nFor v0.1, we use Entities::empty() which works correctly with:\n- Entity UID-based policies (principal == ThoughtGate::App::\"name\")\n- All default embedded policies\n- All test policies\n\nThis does NOT support:\n- Attribute-based policies (principal.namespace == \"prod\")\n- Role hierarchy checks (principal in ThoughtGate::Role::\"admin\")\n\nFull entity store support will be added in a future version when\nneeded for production RBAC policies.\n\nFixes:\n- test_ec_pol_001_streamraw_permitted\n- test_ec_pol_002_inspect_only\n- test_ec_pol_006_post_approval_denied\n- test_ec_pol_010_invalid_syntax\n- test_ec_pol_011_schema_violation\n- test_ec_pol_012_reload_updates_stats (indirectly)\n\n* style(policy): remove extra blank line\n\n* fix(test): use BTreeMap for deterministic snapshot ordering\n\nChanged HashMap to BTreeMap in snapshot tests to ensure consistent\nkey ordering across test runs. This fixes CI failures where HashMap\niteration order is non-deterministic.\n\nFixes test_integrity_snapshot failures in CI.\n\n* docs(policy): add requirement traceability to public methods\n\nAdded doc comments with requirement links to policy_source() and\nstats() methods per coding guidelines. All public functions must\nlink to their implementing requirement.\n\n- policy_source(): Links to REQ-POL-001/F-003 (Policy Loading)\n- stats(): Links to REQ-POL-001/F-005 (Hot-Reload)",
+          "timestamp": "2026-01-11T01:39:39Z",
+          "tree_id": "2c29a0515d15a0f9eb475dd144a7ea18df068d76",
+          "url": "https://github.com/olegmukhin/thoughtgate/commit/0eef9941219be80be9975cb21e2fc975ce520e3d"
+        },
+        "date": 1768095900242,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ttfb/direct/baseline",
+            "value": 137666.42281840704,
+            "unit": "ns"
+          },
+          {
+            "name": "ttfb/proxied/with_relay",
+            "value": 11360106.245555554,
             "unit": "ns"
           }
         ]
