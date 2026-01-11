@@ -1,8 +1,21 @@
 //! Centralized configuration for ThoughtGate proxy.
 //!
+//! # v0.1 Configuration
+//!
+//! In v0.1, most HTTP proxy configuration is not used since Green Path (streaming)
+//! and Amber Path (inspection) are deferred. The configuration is retained for
+//! when these features are enabled.
+//!
+//! Active in v0.1:
+//! - `metrics_port` - Prometheus metrics endpoint
+//!
+//! Deferred to v0.2+:
+//! - Green Path config (streaming timeouts, TCP settings)
+//! - Amber Path config (buffer limits, inspection timeouts)
+//!
 //! # Traceability
-//! - Implements: REQ-CORE-001 Section 3.2 (Network Optimization)
-//! - Implements: REQ-CORE-002 Section 3.2 (Memory Management)
+//! - Deferred: REQ-CORE-001 Section 3.2 (Network Optimization)
+//! - Deferred: REQ-CORE-002 Section 3.2 (Memory Management)
 
 use std::time::Duration;
 
@@ -10,13 +23,18 @@ use std::time::Duration;
 ///
 /// All parameters can be overridden via environment variables.
 ///
+/// # v0.1 Status
+///
+/// Most configuration is **deferred** since Green Path and Amber Path are not
+/// active in v0.1. Configuration is retained for forward compatibility.
+///
 /// # Traceability
-/// - Implements: REQ-CORE-001 Section 3.2 (Configuration Loading)
-/// - Implements: REQ-CORE-002 Section 3.2 (Memory Management Config)
+/// - Deferred: REQ-CORE-001 Section 3.2 (Configuration Loading)
+/// - Deferred: REQ-CORE-002 Section 3.2 (Memory Management Config)
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
     // ─────────────────────────────────────────────────────────────────────────
-    // Green Path (REQ-CORE-001) Configuration
+    // Green Path Configuration - DEFERRED TO v0.2+ (REQ-CORE-001)
     // ─────────────────────────────────────────────────────────────────────────
     /// Enable TCP_NODELAY (Nagle's algorithm disabled)
     pub tcp_nodelay: bool,
@@ -43,7 +61,7 @@ pub struct ProxyConfig {
     pub metrics_port: u16,
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Amber Path (REQ-CORE-002) Configuration
+    // Amber Path Configuration - DEFERRED TO v0.2+ (REQ-CORE-002)
     // ─────────────────────────────────────────────────────────────────────────
     /// Maximum concurrent buffered connections (Amber Path).
     /// Prevents OOM attacks by limiting memory-intensive inspections.

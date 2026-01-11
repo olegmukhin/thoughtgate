@@ -5,10 +5,13 @@ Human-in-the-loop approval proxy for MCP (Model Context Protocol) agents.
 ## Specs
 
 All requirements are in `specs/`:
-- `ARCHITECTURE.md` - System overview
-- `RFC-001_Traffic_Model_Architecture.md` - Four-path routing design
-- `REQ-CORE-*` - Core mechanics (transport, streaming, errors, lifecycle)
-- `REQ-POL-*` - Policy engine (Cedar)
+- `ARCHITECTURE.md` - System overview (v0.1 simplified model)
+- `REQ-CORE-001` - Zero-copy streaming (DEFERRED to v0.2+)
+- `REQ-CORE-002` - Buffered inspection (DEFERRED to v0.2+)
+- `REQ-CORE-003` - MCP transport & routing
+- `REQ-CORE-004` - Error handling
+- `REQ-CORE-005` - Operational lifecycle
+- `REQ-POL-001` - Cedar policy engine (3-way: Forward/Approve/Reject)
 - `REQ-GOV-*` - Governance (tasks, approvals, Slack)
 
 **Read the relevant REQ file before implementing any feature.**
@@ -20,28 +23,28 @@ src/
 ├── error/        # REQ-CORE-004: Error types
 ├── transport/    # REQ-CORE-003: MCP JSON-RPC, routing, upstream
 ├── policy/       # REQ-POL-001: Cedar policy engine
-├── streaming/    # REQ-CORE-001: Zero-copy Green Path
-├── inspection/   # REQ-CORE-002, 006: Amber Path, inspectors
 ├── governance/   # REQ-GOV-001/002/003: Tasks, pipeline, Slack
 └── lifecycle/    # REQ-CORE-005: Startup, shutdown, health
 ```
 
-## Domain Model
+## Domain Model (v0.1 Simplified)
 
-Traffic flows through exactly ONE path:
+Policy evaluates to ONE action:
 
-| Path | Trigger | Behavior |
-|------|---------|----------|
-| **Green** | `PolicyDecision::Green` | Zero-copy streaming |
-| **Amber** | `PolicyDecision::Amber` | Buffer & inspect |
-| **Red** | `PolicyDecision::Red` | Reject immediately |
-| **Approval** | `PolicyDecision::Approval` | Slack workflow, block until approved |
+| Action | Trigger | Behavior |
+|--------|---------|----------|
+| **Forward** | `PolicyAction::Forward` | Send to upstream immediately |
+| **Approve** | `PolicyAction::Approve` | Block until Slack approval, then forward |
+| **Reject** | `PolicyAction::Reject` | Return error immediately |
+
+**Response handling:** All responses are passed through directly. No inspection or streaming distinction in v0.1.
 
 ### v0.1 Constraints
 - **Blocking approval mode** - Hold HTTP connection until approval (no SEP-1686 tasks)
 - **Zombie prevention** - Check connection liveness before executing approved tools
 - **Single upstream** - One `THOUGHTGATE_UPSTREAM` per instance
 - **In-memory state** - Tasks lost on restart
+- **No inspection** - Green/Amber paths deferred to v0.2+
 
 ## Code Standards
 
@@ -120,7 +123,8 @@ pub fn parse_jsonrpc(bytes: &[u8]) -> Result<JsonRpcMessage, ParseError>
 
 ### Key Types (must be consistent across codebase)
 ```rust
-pub enum PolicyDecision { Green, Amber, Red, Approval }
+// v0.1 simplified policy actions
+pub enum PolicyAction { Forward, Approve { timeout: Duration }, Reject { reason: String } }
 pub enum TaskStatus { Working, InputRequired, Executing, Completed, Failed, Rejected, Cancelled, Expired }
 pub enum ApprovalDecision { Approved, Rejected { reason: Option<String> } }
 ```
@@ -146,29 +150,30 @@ cargo clippy -- -D warnings    # Lint
 cargo fuzz run fuzz_jsonrpc    # Fuzz JSON-RPC parser
 ```
 
-## Implementation Order
+## Implementation Order (v0.1)
 
 1. `REQ-CORE-004` - Error types (everything depends on this)
-2. `REQ-POL-001` - Cedar policy engine
+2. `REQ-POL-001` - Cedar policy engine (3-way: Forward/Approve/Reject)
 3. `REQ-CORE-003` - MCP transport & routing
-4. `REQ-CORE-001` - Green path streaming
-5. `REQ-CORE-002` - Amber path buffering
-6. `REQ-CORE-006` - Inspector framework
-7. `REQ-GOV-001` - Task lifecycle
-8. `REQ-GOV-003` - Slack integration
-9. `REQ-GOV-002` - Execution pipeline
-10. `REQ-CORE-005` - Lifecycle management
+4. `REQ-GOV-001` - Task lifecycle (blocking mode)
+5. `REQ-GOV-003` - Slack integration
+6. `REQ-GOV-002` - Execution pipeline
+7. `REQ-CORE-005` - Lifecycle management
+
+**Deferred to v0.2+:**
+- `REQ-CORE-001` - Green path streaming
+- `REQ-CORE-002` - Amber path buffering/inspection
 
 ## Quick Reference
 
 ### Error Codes
 ```
--32700  ParseError           -32003  PolicyDenied
+-32700  ParseError           -32003  PolicyDenied (Reject action)
 -32600  InvalidRequest       -32007  ApprovalRejected
 -32601  MethodNotFound       -32008  ApprovalTimeout
 -32602  InvalidParams        -32009  RateLimited
--32603  InternalError        -32010  InspectionFailed
--32000  UpstreamConnFailed   -32013  ServiceUnavailable
+-32603  InternalError        -32013  ServiceUnavailable
+-32000  UpstreamConnFailed
 -32001  UpstreamTimeout
 -32002  UpstreamError
 ```
@@ -185,18 +190,6 @@ THOUGHTGATE_APPROVAL_TIMEOUT_SECS=300
 
 ## Requirement-Specific Notes
 
-### REQ-CORE-001 (Green Path)
-```rust
-// FORBIDDEN - defeats zero-copy:
-body.clone()
-Vec::<u8>::extend_from_slice()
-String::from_utf8()
-
-// REQUIRED:
-Bytes (move semantics)
-http_body::Frame forwarding
-```
-
 ### REQ-CORE-003 (JSON-RPC)
 ```rust
 // Preserve exact ID type - never coerce
@@ -207,6 +200,14 @@ pub enum JsonRpcId {
     String(String),
     Null,  // Notification, no response
 }
+```
+
+### REQ-POL-001 (Cedar Policy)
+```rust
+// v0.1 simplified: 3 actions only
+// Forward -> send to upstream
+// Approve -> block until Slack approval
+// Reject -> return error
 ```
 
 ### REQ-GOV-003 (Slack)

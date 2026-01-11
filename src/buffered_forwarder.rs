@@ -1,8 +1,22 @@
 //! Buffered Forwarder for Amber Path traffic.
 //!
-//! This module implements the "Amber Path" for ThoughtGate's traffic classification.
-//! Traffic enters this path when the Governance Engine returns `Decision::Inspect`.
+//! # v0.1 Status: DEFERRED
 //!
+//! This module implements the "Amber Path" (buffered inspection) which is **deferred**
+//! to v0.2+. In v0.1, responses are passed through directly without inspection.
+//!
+//! The inspection infrastructure is retained for when PII detection or response
+//! validation is needed.
+//!
+//! # When to Activate (v0.2+)
+//!
+//! - When PII detection/redaction is needed
+//! - When schema validation is required
+//! - When request/response transformation is needed
+//!
+//! # Original Design
+//!
+//! Traffic enters this path when the Governance Engine returns `Decision::Inspect`.
 //! The Amber Path prioritizes **Safety** and **Visibility** over raw latency by
 //! buffering and inspecting payloads before forwarding.
 //!
@@ -15,7 +29,7 @@
 //! - **Inspector Chain**: Executes inspectors in order with short-circuit on rejection
 //!
 //! # Traceability
-//! - Implements: REQ-CORE-002 (Buffered Termination Strategy)
+//! - Deferred: REQ-CORE-002 (Buffered Termination Strategy)
 
 use std::borrow::Cow;
 use std::panic::AssertUnwindSafe;

@@ -5,9 +5,27 @@
 | **ID** | `REQ-CORE-001` |
 | **Title** | Zero-Copy Streaming (Green Path) |
 | **Type** | Core Mechanic |
-| **Status** | Draft |
-| **Priority** | **Critical** |
-| **Tags** | `#proxy` `#streaming` `#performance` `#latency` `#zero-copy` |
+| **Status** | **DEFERRED (v0.2+)** |
+| **Priority** | Low (deferred) |
+| **Tags** | `#proxy` `#streaming` `#performance` `#latency` `#zero-copy` `#deferred` |
+
+> ## ⚠️ DEFERRED TO FUTURE VERSION
+>
+> **This requirement is deferred from v0.1.** The Green Path was designed for response streaming
+> (LLM token streams, large file responses), but v0.1 does not implement response inspection
+> or require streaming distinction.
+>
+> **v0.1 Simplification:**
+> - All responses are passed through without buffering or streaming distinction
+> - MCP responses are JSON-RPC - complete JSON blobs, not streamed tokens
+> - No LLM token streaming to handle in v0.1
+>
+> **When to Reintroduce:**
+> - When response PII detection is needed → Amber Path required
+> - When streaming LLM outputs → Green Path required for memory efficiency
+> - When large file responses need zero-copy → Green Path required
+>
+> **See:** `architecture.md` Section 7.2 (Out of Scope)
 
 ## 1. Context & Decision Rationale
 

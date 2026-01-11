@@ -5,9 +5,28 @@
 | **ID** | `REQ-CORE-002` |
 | **Title** | Buffered Inspection (Amber Path) |
 | **Type** | Core Mechanic |
-| **Status** | Implemented |
-| **Priority** | **High** |
-| **Tags** | `#proxy` `#buffering` `#security` `#inspection` `#redaction` |
+| **Status** | **DEFERRED (v0.2+)** |
+| **Priority** | Low (deferred) |
+| **Tags** | `#proxy` `#buffering` `#security` `#inspection` `#redaction` `#deferred` |
+
+> ## ⚠️ DEFERRED TO FUTURE VERSION
+>
+> **This requirement is deferred from v0.1.** The Amber Path was designed for request/response
+> inspection (PII detection, schema validation, transformations), but v0.1 does not implement
+> inspection functionality.
+>
+> **v0.1 Simplification:**
+> - All requests are forwarded without inspection
+> - All responses are passed through without inspection
+> - No buffering distinction between paths
+>
+> **When to Reintroduce:**
+> - When PII detection/redaction is needed
+> - When schema validation is required
+> - When request/response transformation is needed
+> - When pre-approval inspection of tool arguments is needed
+>
+> **See:** `architecture.md` Section 7.2 (Out of Scope)
 
 ## 1. Context & Decision Rationale
 
