@@ -44,12 +44,6 @@ impl TaskId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
-
-    /// Returns the string representation of the task ID.
-    #[must_use]
-    pub fn as_str(&self) -> String {
-        self.0.to_string()
-    }
 }
 
 impl Default for TaskId {
@@ -101,6 +95,8 @@ pub struct Principal {
 
 impl Principal {
     /// Creates a new principal with only an app name.
+    ///
+    /// Implements: REQ-GOV-001/§6.1
     #[must_use]
     pub fn new(app_name: impl Into<String>) -> Self {
         Self {
@@ -111,6 +107,8 @@ impl Principal {
     }
 
     /// Returns a key suitable for rate limiting lookups.
+    ///
+    /// Implements: REQ-GOV-001/F-009.1
     #[must_use]
     pub fn rate_limit_key(&self) -> String {
         self.app_name.clone()
@@ -152,6 +150,9 @@ pub struct ToolCallResult {
 /// Decision made by an approver.
 ///
 /// Implements: REQ-GOV-001/§6.1
+///
+/// Note: The `Rejected` variant's `reason` field is public by virtue of the enum
+/// being public, allowing cross-crate construction and pattern matching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApprovalDecision {
     /// Request was approved
@@ -231,6 +232,7 @@ pub struct FailureInfo {
 /// State machine transitions:
 /// - Working → InputRequired (pre-approval complete)
 /// - Working → Failed (pre-approval inspection failed)
+/// - Working → Expired (TTL exceeded during pre-approval)
 /// - InputRequired → Executing (approval received)
 /// - InputRequired → Rejected (approver rejected)
 /// - InputRequired → Cancelled (agent cancelled)
@@ -291,8 +293,7 @@ impl TaskStatus {
             Self::Working | Self::Executing => "working",
             Self::InputRequired => "input_required",
             Self::Completed => "completed",
-            Self::Failed | Self::Expired => "failed",
-            Self::Rejected => "failed",
+            Self::Failed | Self::Expired | Self::Rejected => "failed",
             Self::Cancelled => "cancelled",
         }
     }
@@ -307,6 +308,7 @@ impl TaskStatus {
             // From Working
             (TaskStatus::Working, TaskStatus::InputRequired)
                 | (TaskStatus::Working, TaskStatus::Failed)
+                | (TaskStatus::Working, TaskStatus::Expired)
                 // From InputRequired
                 | (TaskStatus::InputRequired, TaskStatus::Executing)
                 | (TaskStatus::InputRequired, TaskStatus::Rejected)
@@ -420,7 +422,10 @@ impl Task {
     ) -> Self {
         let id = TaskId::new();
         let now = Utc::now();
-        let expires_at = now + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::zero());
+        // Clamp TTL to max 30 days if conversion fails (overflow for extremely large durations)
+        let max_ttl = chrono::Duration::days(30);
+        let chrono_ttl = chrono::Duration::from_std(ttl).unwrap_or(max_ttl);
+        let expires_at = now + chrono_ttl;
         let request_hash = hash_request(&original_request);
         let poll_interval = compute_poll_interval(ttl);
 
@@ -728,24 +733,32 @@ impl TaskStore {
     }
 
     /// Creates a new task store with default configuration.
+    ///
+    /// Implements: REQ-GOV-001/§10
     #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(TaskStoreConfig::default())
     }
 
     /// Returns the store configuration.
+    ///
+    /// Implements: REQ-GOV-001/§5.2
     #[must_use]
     pub fn config(&self) -> &TaskStoreConfig {
         &self.config
     }
 
     /// Returns the number of pending (non-terminal) tasks.
+    ///
+    /// Implements: REQ-GOV-001/F-009.3
     #[must_use]
     pub fn pending_count(&self) -> usize {
         self.pending_count.load(Ordering::Relaxed)
     }
 
     /// Returns the total number of tasks (including terminal).
+    ///
+    /// Implements: REQ-GOV-001/§10
     #[must_use]
     pub fn total_count(&self) -> usize {
         self.tasks.len()
@@ -775,6 +788,13 @@ impl TaskStore {
     /// Implements: REQ-GOV-001/F-002, F-009
     ///
     /// Checks rate limits and capacity before insertion.
+    ///
+    /// # Concurrency Note
+    ///
+    /// The capacity and per-principal limit checks are not atomic with insertion.
+    /// Under high concurrency, limits may be temporarily exceeded. This is acceptable
+    /// for v0.1 in-memory blocking mode where tasks are short-lived. Future versions
+    /// may use atomic reservations (compare_exchange/fetch_update) for strict enforcement.
     pub fn create(
         &self,
         original_request: ToolCallRequest,
@@ -1045,10 +1065,11 @@ impl TaskStore {
                     status: entry.task.status,
                 });
             }
-            // F-006.3: Executing (too late)
-            return Err(TaskError::AlreadyTerminal {
+            // F-006.3: Cannot cancel from non-InputRequired, non-terminal state (e.g., Executing)
+            return Err(TaskError::InvalidTransition {
                 task_id: task_id.clone(),
-                status: entry.task.status,
+                from: entry.task.status,
+                to: TaskStatus::Cancelled,
             });
         }
 
@@ -1181,49 +1202,69 @@ impl TaskStore {
 
     /// Waits for a task to reach a terminal state.
     ///
+    /// Implements: REQ-GOV-001/§10
+    ///
     /// Returns the task if it reaches a terminal state within the timeout,
     /// or an error if the timeout is exceeded.
+    ///
+    /// Uses a loop to handle the race between checking terminal status and
+    /// registering for notifications. The Notify::notified() future is created
+    /// before checking the status to avoid missing notifications.
     pub async fn wait_for_terminal(
         &self,
         task_id: &TaskId,
         timeout: Duration,
     ) -> Result<Task, TaskError> {
-        let notify = {
-            let entry = self.tasks.get(task_id).ok_or_else(|| TaskError::NotFound {
-                task_id: task_id.clone(),
-            })?;
+        let deadline = tokio::time::Instant::now() + timeout;
 
-            // Already terminal?
-            if entry.task.status.is_terminal() {
-                return Ok(entry.task.clone());
-            }
-
-            entry.notify.clone()
-        };
-
-        // Wait for notification or timeout
-        let result = tokio::time::timeout(timeout, notify.notified()).await;
-
-        // Check result
-        let entry = self.tasks.get(task_id).ok_or_else(|| TaskError::NotFound {
-            task_id: task_id.clone(),
-        })?;
-
-        if entry.task.status.is_terminal() {
-            Ok(entry.task.clone())
-        } else if result.is_err() {
-            Err(TaskError::ResultNotReady {
-                task_id: task_id.clone(),
-            })
-        } else {
-            // Spurious wakeup, check again
-            if entry.task.status.is_terminal() {
-                Ok(entry.task.clone())
-            } else {
-                Err(TaskError::ResultNotReady {
+        loop {
+            // Get the notify handle first
+            let notify = {
+                let entry = self.tasks.get(task_id).ok_or_else(|| TaskError::NotFound {
                     task_id: task_id.clone(),
-                })
+                })?;
+                entry.notify.clone()
+            };
+
+            // Create the notified future BEFORE checking status to avoid race
+            let notified = notify.notified();
+
+            // Now check if already terminal (after creating notified future)
+            {
+                let entry = self.tasks.get(task_id).ok_or_else(|| TaskError::NotFound {
+                    task_id: task_id.clone(),
+                })?;
+
+                if entry.task.status.is_terminal() {
+                    return Ok(entry.task.clone());
+                }
             }
+
+            // Calculate remaining time
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(TaskError::ResultNotReady {
+                    task_id: task_id.clone(),
+                });
+            }
+            let remaining = deadline - now;
+
+            // Wait for notification or timeout
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                // Timeout - do one final check
+                let entry = self.tasks.get(task_id).ok_or_else(|| TaskError::NotFound {
+                    task_id: task_id.clone(),
+                })?;
+
+                if entry.task.status.is_terminal() {
+                    return Ok(entry.task.clone());
+                }
+                return Err(TaskError::ResultNotReady {
+                    task_id: task_id.clone(),
+                });
+            }
+
+            // Notified - loop back to check status (handles spurious wakeups)
         }
     }
 
@@ -1337,6 +1378,7 @@ mod tests {
         // From Working
         assert!(TaskStatus::Working.can_transition_to(TaskStatus::InputRequired));
         assert!(TaskStatus::Working.can_transition_to(TaskStatus::Failed));
+        assert!(TaskStatus::Working.can_transition_to(TaskStatus::Expired));
 
         // From InputRequired
         assert!(TaskStatus::InputRequired.can_transition_to(TaskStatus::Executing));
@@ -1652,9 +1694,16 @@ mod tests {
             )
             .unwrap();
 
-        // Try to cancel
+        // Try to cancel - should fail with InvalidTransition since Executing is not terminal
         let result = store.cancel(&task.id);
-        assert!(matches!(result, Err(TaskError::AlreadyTerminal { .. })));
+        assert!(matches!(
+            result,
+            Err(TaskError::InvalidTransition {
+                from: TaskStatus::Executing,
+                to: TaskStatus::Cancelled,
+                ..
+            })
+        ));
     }
 
     /// Tests task expiration.
