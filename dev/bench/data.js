@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1768154533118,
+  "lastUpdate": 1768156766699,
   "repoUrl": "https://github.com/olegmukhin/thoughtgate",
   "entries": {
     "Benchmark": [
@@ -407,6 +407,40 @@ window.BENCHMARK_DATA = {
           {
             "name": "ttfb/proxied/with_relay",
             "value": 11386984.62777778,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "oleg.v.mukhin@gmail.com",
+            "name": "Oleg Mukhin",
+            "username": "olegmukhin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "90d3f55f650449921a0395522d4b6bcbfc784e7a",
+          "message": "feat(governance): add Slack approval integration (#19)\n\n* feat(governance): add Slack approval integration\n\nImplement polling-based approval architecture for human-in-the-loop\nworkflows. Sidecars post approval requests to Slack and poll for\nreaction-based decisions (👍 = approve, 👎 = reject).\n\nComponents:\n- ApprovalAdapter trait abstracting external approval systems\n- SlackAdapter with Block Kit messages and reactions.get polling\n- PollingScheduler with BTreeMap priority queue\n- Token bucket rate limiter (1 req/sec for Slack API)\n- Exponential backoff: 5s → 10s → 20s → 30s max\n\nKey design decisions:\n- Polling model (not callbacks) since sidecars aren't addressable\n- DashMap for concurrent task reference storage\n- User display name caching to reduce API calls\n- Graceful shutdown drains pending approvals\n\nImplements: REQ-GOV-003\n\n* fix(governance): address review feedback for approval integration\n\n- Fix BTreeMap key collision when multiple tasks share same poll time\n  by using composite key (Instant, TaskId) instead of just Instant.\n  Added Ord/PartialOrd derives to TaskId.\n\n- Use configurable initial_poll_interval in SlackAdapter instead of\n  hardcoded 5 second value. Reads THOUGHTGATE_APPROVAL_POLL_INTERVAL_SECS\n  environment variable.\n\n- Make user display name lookup best-effort in poll_for_decision.\n  Falls back to user_id if Slack API call fails, preventing decision\n  loss due to transient network errors.\n\n- Add test_concurrent_submit_no_data_loss to verify multiple tasks\n  with same poll time are all preserved in the queue.",
+          "timestamp": "2026-01-11T18:36:53Z",
+          "tree_id": "ba72a8e497fb6ac5402ffc2ca554ce2e3e70f831",
+          "url": "https://github.com/olegmukhin/thoughtgate/commit/90d3f55f650449921a0395522d4b6bcbfc784e7a"
+        },
+        "date": 1768156765842,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ttfb/direct/baseline",
+            "value": 135829.08751747853,
+            "unit": "ns"
+          },
+          {
+            "name": "ttfb/proxied/with_relay",
+            "value": 11366349.33,
             "unit": "ns"
           }
         ]
