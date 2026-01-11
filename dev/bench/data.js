@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1768095900641,
+  "lastUpdate": 1768147322697,
   "repoUrl": "https://github.com/olegmukhin/thoughtgate",
   "entries": {
     "Benchmark": [
@@ -305,6 +305,40 @@ window.BENCHMARK_DATA = {
           {
             "name": "ttfb/proxied/with_relay",
             "value": 11360106.245555554,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "oleg.v.mukhin@gmail.com",
+            "name": "Oleg Mukhin",
+            "username": "olegmukhin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ec4bb39ba81cbf7e35e7f9bfa52bd642df3721e4",
+          "message": "feat(transport): implement REQ-CORE-003 MCP Transport & Routing (#16)\n\n* feat(transport): implement REQ-CORE-003 MCP Transport & Routing\n\nAdd MCP transport layer for JSON-RPC 2.0 message handling:\n\n- jsonrpc.rs: JSON-RPC 2.0 types (JsonRpcId, JsonRpcRequest/Response,\n  McpRequest) with custom serde to preserve ID types, SEP-1686 task\n  metadata extraction, batch request support\n- router.rs: Method routing (tools/* → Policy, tasks/* → TaskHandler,\n  resources/*, prompts/* → Policy, unknown → PassThrough)\n- upstream.rs: Connection-pooled reqwest client with timeout handling\n  and error classification\n- server.rs: Axum HTTP server with POST /mcp/v1 endpoint, semaphore-\n  based concurrency limiting, proper notification handling\n\nImplements: REQ-CORE-003\nRefs: specs/REQ-CORE-003_MCP_Transport_and_Routing.md\n\n* docs(transport): clarify JsonRpcId::Null usage and header forwarding\n\n- Document that JsonRpcId::Null is for error response serialization when\n  request ID is unknown, not for deserializing \"id\": null (which becomes\n  Option::None via serde's default behavior)\n- Add note explaining header forwarding (F-004.2) is intentionally not\n  implemented due to security concerns with forwarding Authorization\n- Add SAFETY comments to env var tests explaining single-threaded context\n\n* fix(transport): address review feedback for robustness and safety\n\nServer fixes:\n- Return proper JSON-RPC error instead of empty array on batch\n  serialization failure\n\nUpstream client fixes:\n- Add requirement traceability to with_base_url and UpstreamForwarder\n- Validate env var parsing with proper error messages instead of\n  silent fallback to defaults\n- Validate base_url is non-empty and parseable in UpstreamClient::new()\n- Handle 204 No Content responses for notifications\n- Use consistent -32002 error code for all upstream errors\n- Reject empty batch requests before forwarding to upstream\n\nTest improvements:\n- Add #[serial] attribute to env var tests\n- Add RAII EnvVarGuard for proper env var restoration\n- Add tests for invalid URL, empty URL, and invalid timeout values\n\nCI fix:\n- Add fallback from cargo-binstall to cargo install for cargo-audit\n- Add version verification after installation\n\n* fix(ci): force reinstall cargo-audit to handle stale cache\n\n* fix(jsonrpc): preserve explicit null ID per JSON-RPC 2.0 spec\n\nPer the JSON-RPC 2.0 specification, \"id\": null is a valid (though\nunusual) request that should have its null ID echoed back in responses.\nThis is distinct from a missing id field, which indicates a notification.\n\nPreviously, serde's Option<T> handling converted both missing fields\nand explicit null to None, treating \"id\": null as a notification.\n\nChanges:\n- Add MaybeNull<T> wrapper to distinguish Absent vs Null vs Present\n- Add custom deserialize_optional_id that preserves explicit null as\n  Some(JsonRpcId::Null)\n- Update tests to verify null ID is preserved and is NOT a notification\n- Add test_missing_id_is_notification to verify notifications work\n\nImplements: REQ-CORE-003/F-001.4 (Preserve ID type)\n\n* fix(transport): address additional review feedback\n\njsonrpc.rs:\n- Add MAX_TTL_MS constant (24 hours) and clamp TTL values to prevent\n  issues with extremely large Duration values\n\nrouter.rs:\n- Add requirement traceability to TaskMethod::as_str() and McpRouter::new()\n\nserver.rs:\n- Document why batch processing is sequential (F-007.5 batch approval\n  requires evaluating all requests together, not parallel)\n\nNote: env var test isolation (serial_test + EnvVarGuard) was already\nimplemented in previous commit.\n\n* fix(docker): resolve E0761 duplicate module error\n\n- Update Dockerfile to create src/error/mod.rs instead of src/error.rs\n  to match actual project structure and prevent Rust compiler error\n- Add requirement traceability to parse_single_request function\n- Update uuid dependency from 1.11 to 1.19\n\nFixes: CI build container image failure\n\n* fix(transport): add traceability markers and HTTP-layer body limit\n\n- Add requirement traceability to JsonRpcResponse::success/error,\n  McpRequest::is_notification/is_task_augmented/to_jsonrpc_request\n- Add requirement traceability to McpServer::new/with_upstream/router/run\n- Apply DefaultBodyLimit layer in router() to reject oversized requests\n  before buffering (prevents memory exhaustion from large payloads)\n- Update test_body_size_limit to verify HTTP-layer rejection (413)\n\nImplements: REQ-CORE-003/§6.2, F-001.3, F-003, F-004, §5.2\n\n* fix(transport): handle batch 204, add TTL test, document security\n\n- Handle 204 No Content in forward_batch for notification-only batches\n- Document that synthetic notification responses are for internal use only\n- Add test_ttl_clamped_to_max to verify 24-hour TTL limit enforcement\n- Document TLS 1.2+ enforcement by rustls in module docs\n\nImplements: REQ-CORE-003/F-007, F-003\n\n* fix(jsonrpc): serialize response id as null per JSON-RPC 2.0 spec\n\nPer JSON-RPC 2.0 spec section 5, the response \"id\" field is REQUIRED\nand MUST be null if the request id could not be determined (e.g., for\nparse errors). Previously, None was skipped during serialization.\n\n- Remove skip_serializing_if from JsonRpcResponse.id field\n- None now serializes as \"id\": null (required by spec)\n- Add documentation explaining id serialization semantics\n- Add test verifying null id serialization for parse errors\n\nImplements: REQ-CORE-003/§6.2",
+          "timestamp": "2026-01-11T15:56:35Z",
+          "tree_id": "ceb4a0c77988b171b5792e22604bc261fc156be9",
+          "url": "https://github.com/olegmukhin/thoughtgate/commit/ec4bb39ba81cbf7e35e7f9bfa52bd642df3721e4"
+        },
+        "date": 1768147322450,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ttfb/direct/baseline",
+            "value": 136045.6110411227,
+            "unit": "ns"
+          },
+          {
+            "name": "ttfb/proxied/with_relay",
+            "value": 11343962.458888888,
             "unit": "ns"
           }
         ]
