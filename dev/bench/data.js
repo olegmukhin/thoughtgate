@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1768172472879,
+  "lastUpdate": 1768172721876,
   "repoUrl": "https://github.com/olegmukhin/thoughtgate",
   "entries": {
     "Benchmark": [
@@ -509,6 +509,40 @@ window.BENCHMARK_DATA = {
           {
             "name": "ttfb/proxied/with_relay",
             "value": 11360005.077777779,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "oleg.v.mukhin@gmail.com",
+            "name": "Oleg Mukhin",
+            "username": "olegmukhin"
+          },
+          "committer": {
+            "email": "oleg.v.mukhin@gmail.com",
+            "name": "Oleg Mukhin",
+            "username": "olegmukhin"
+          },
+          "distinct": true,
+          "id": "b3b119c763d9173de9f935593ac59a4a08f878ee",
+          "message": "fix(lifecycle): ensure drain_timeout always less than shutdown_timeout\n\nFix edge case where very small shutdown_timeout (≤5s) could result in\ndrain_timeout equaling shutdown_timeout after adjustment, leaving no\ntime for post-drain cleanup.\n\nNow enforces:\n- Minimum 1 second post-drain buffer\n- drain_timeout capped at shutdown_timeout - 1s\n- Minimum 1 second drain time",
+          "timestamp": "2026-01-11T23:02:35Z",
+          "tree_id": "1d525f9982a413da957468ca51931e854c0c1d07",
+          "url": "https://github.com/olegmukhin/thoughtgate/commit/b3b119c763d9173de9f935593ac59a4a08f878ee"
+        },
+        "date": 1768172721586,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ttfb/direct/baseline",
+            "value": 132653.03682265847,
+            "unit": "ns"
+          },
+          {
+            "name": "ttfb/proxied/with_relay",
+            "value": 11359538.393333333,
             "unit": "ns"
           }
         ]
