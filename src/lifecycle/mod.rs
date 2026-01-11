@@ -111,34 +111,26 @@ impl LifecycleConfig {
     pub fn from_env() -> Self {
         let default = Self::default();
 
-        let shutdown_timeout = std::env::var("THOUGHTGATE_SHUTDOWN_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(default.shutdown_timeout);
+        let shutdown_timeout = parse_duration_env(
+            "THOUGHTGATE_SHUTDOWN_TIMEOUT_SECS",
+            default.shutdown_timeout,
+        );
 
-        let drain_timeout = std::env::var("THOUGHTGATE_DRAIN_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(default.drain_timeout);
+        let drain_timeout =
+            parse_duration_env("THOUGHTGATE_DRAIN_TIMEOUT_SECS", default.drain_timeout);
 
-        let startup_timeout = std::env::var("THOUGHTGATE_STARTUP_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(default.startup_timeout);
+        let startup_timeout =
+            parse_duration_env("THOUGHTGATE_STARTUP_TIMEOUT_SECS", default.startup_timeout);
 
         let require_upstream_at_startup = std::env::var("THOUGHTGATE_REQUIRE_UPSTREAM_AT_STARTUP")
             .ok()
             .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
             .unwrap_or(default.require_upstream_at_startup);
 
-        let upstream_health_interval = std::env::var("THOUGHTGATE_UPSTREAM_HEALTH_INTERVAL_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(default.upstream_health_interval);
+        let upstream_health_interval = parse_duration_env(
+            "THOUGHTGATE_UPSTREAM_HEALTH_INTERVAL_SECS",
+            default.upstream_health_interval,
+        );
 
         Self {
             shutdown_timeout,
@@ -147,6 +139,25 @@ impl LifecycleConfig {
             require_upstream_at_startup,
             upstream_health_interval,
         }
+    }
+}
+
+/// Parse a duration environment variable with warning on invalid values.
+fn parse_duration_env(var_name: &str, default: Duration) -> Duration {
+    match std::env::var(var_name) {
+        Ok(value) => match value.parse::<u64>() {
+            Ok(secs) => Duration::from_secs(secs),
+            Err(_) => {
+                warn!(
+                    var = var_name,
+                    value = %value,
+                    default_secs = default.as_secs(),
+                    "Invalid value for environment variable, using default"
+                );
+                default
+            }
+        },
+        Err(_) => default,
     }
 }
 

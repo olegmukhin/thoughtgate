@@ -214,12 +214,10 @@ impl UpstreamClient {
         let port = url.port_or_known_default().unwrap_or(80);
         let addr = format!("{}:{}", host, port);
 
-        // TCP connect with short timeout (5s)
-        let connect_result = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::net::TcpStream::connect(&addr),
-        )
-        .await;
+        // TCP connect using configured connect_timeout for consistency
+        let timeout = self.config.connect_timeout;
+        let connect_result =
+            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await;
 
         match connect_result {
             Ok(Ok(_stream)) => {
@@ -232,7 +230,7 @@ impl UpstreamClient {
             }),
             Err(_timeout) => Err(ThoughtGateError::UpstreamTimeout {
                 url: self.config.base_url.clone(),
-                timeout_secs: 5,
+                timeout_secs: timeout.as_secs(),
             }),
         }
     }
