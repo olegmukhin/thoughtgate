@@ -188,6 +188,74 @@ impl UpstreamClient {
         Ok(Self { client, config })
     }
 
+    /// Perform a health check to verify upstream connectivity.
+    ///
+    /// Implements: REQ-CORE-005/F-007.3
+    ///
+    /// This performs a simple TCP connectivity check to the upstream server
+    /// without sending a full MCP request. Used for readiness probes.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if the connection can be established
+    /// - `Err(ThoughtGateError::UpstreamConnectionFailed)` if connection fails
+    /// - `Err(ThoughtGateError::UpstreamTimeout)` if connection times out
+    pub async fn health_check(&self) -> Result<(), ThoughtGateError> {
+        let url = match reqwest::Url::parse(&self.config.base_url) {
+            Ok(u) => u,
+            Err(e) => {
+                return Err(ThoughtGateError::InternalError {
+                    correlation_id: format!("health-check-url-parse-error: {}", e),
+                });
+            }
+        };
+
+        let host = match url.host_str() {
+            Some(h) => h,
+            None => {
+                // No host means malformed URL - fail clearly rather than probing localhost
+                return Err(ThoughtGateError::InternalError {
+                    correlation_id: format!(
+                        "health-check-no-host: URL '{}' has no host component",
+                        self.config.base_url
+                    ),
+                });
+            }
+        };
+        let port = match url.port_or_known_default() {
+            Some(p) => p,
+            None => {
+                warn!(
+                    url = %self.config.base_url,
+                    fallback = 80,
+                    "URL has no port and unknown scheme, falling back to port 80 for health check"
+                );
+                80
+            }
+        };
+        let addr = format!("{}:{}", host, port);
+
+        // TCP connect using configured connect_timeout for consistency
+        let timeout = self.config.connect_timeout;
+        let connect_result =
+            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await;
+
+        match connect_result {
+            Ok(Ok(_stream)) => {
+                // Connection successful, drop stream immediately
+                Ok(())
+            }
+            Ok(Err(e)) => Err(ThoughtGateError::UpstreamConnectionFailed {
+                url: self.config.base_url.clone(),
+                reason: e.to_string(),
+            }),
+            Err(_timeout) => Err(ThoughtGateError::UpstreamTimeout {
+                url: self.config.base_url.clone(),
+                timeout_secs: timeout.as_secs(),
+            }),
+        }
+    }
+
     /// Forward a single request to upstream.
     ///
     /// Implements: REQ-CORE-003/F-004 (Upstream Forwarding)
