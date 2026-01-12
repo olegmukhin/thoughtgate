@@ -32,11 +32,15 @@ PROXY_PORT=4141
 K6_VUS=10
 K6_DURATION="10s"
 
+# Initialize PIDs to avoid unset variable errors under set -u
+MOCK_LLM_PID=""
+PROXY_PID=""
+
 # Cleanup function
 cleanup() {
     echo "🧹 Cleaning up..."
-    kill $MOCK_LLM_PID 2>/dev/null || true
-    kill $PROXY_PID 2>/dev/null || true
+    [ -n "$MOCK_LLM_PID" ] && kill "$MOCK_LLM_PID" 2>/dev/null || true
+    [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
     rm -f direct_results.json proxy_results.json 2>/dev/null || true
 }
 

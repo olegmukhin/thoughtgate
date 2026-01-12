@@ -308,7 +308,7 @@ Run k6 against:
 
 Calculate: `overhead = proxy_latency - direct_latency`
 
-### 7.6 Policy Evaluation Metrics (Criterion)
+### 7.7 Policy Evaluation Metrics (Criterion)
 
 New Criterion benchmark (`benches/policy_eval.rs`):
 

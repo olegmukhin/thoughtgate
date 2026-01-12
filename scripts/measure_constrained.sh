@@ -259,7 +259,8 @@ EOF
 # ─────────────────────────────────────────────────────────────────────────────
 
 calculate_metrics() {
-    local mem_under_load=$1
+    local idle_mem=$1
+    local mem_under_load=$2
     
     log_info "Calculating constrained performance metrics..."
     
@@ -315,13 +316,15 @@ if not results:
 print(f"Constrained Performance:")
 print(f"  Latency: p50={results['p50']:.2f}ms, p95={results['p95']:.2f}ms, p99={results['p99']:.2f}ms")
 print(f"  Requests: {results['count']} total, ~{results['rps']:.0f} RPS")
-print(f"  Memory: ${mem_under_load}MB under load")
+print(f"  Memory: ${idle_mem}MB idle, ${mem_under_load}MB under load")
 
 # Generate metrics
-mem_bytes = int(float('$mem_under_load') * 1024 * 1024)
+idle_mem_bytes = int(float('$idle_mem') * 1024 * 1024)
+load_mem_bytes = int(float('$mem_under_load') * 1024 * 1024)
 metrics = [
     {"name": "throughput/rps_constrained", "value": round(results['rps'], 0), "unit": "req/s"},
-    {"name": "memory/constrained_rss", "value": mem_bytes, "unit": "bytes"},
+    {"name": "memory/idle_rss", "value": idle_mem_bytes, "unit": "bytes"},
+    {"name": "memory/constrained_rss", "value": load_mem_bytes, "unit": "bytes"},
     {"name": "latency/constrained_p50", "value": round(results['p50'], 3), "unit": "ms"},
     {"name": "latency/constrained_p95", "value": round(results['p95'], 3), "unit": "ms"},
     {"name": "latency/constrained_p99", "value": round(results['p99'], 3), "unit": "ms"},
@@ -395,8 +398,8 @@ main() {
     # Collect memory under load
     load_mem=$(collect_memory_metrics "under_load")
     
-    # Calculate metrics
-    calculate_metrics "$load_mem"
+    # Calculate metrics (pass both idle and load memory)
+    calculate_metrics "$idle_mem" "$load_mem"
     
     log_success "Constrained resource benchmark complete!"
 }

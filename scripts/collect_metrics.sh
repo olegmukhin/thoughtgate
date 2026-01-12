@@ -230,7 +230,8 @@ parse_criterion_results() {
     log_info "Parsing Criterion benchmark results..."
     
     # Find and parse estimates.json files
-    find "$criterion_dir" -name "estimates.json" -type f | while read -r file; do
+    # Use process substitution to avoid subshell scope issue with METRICS array
+    while read -r file; do
         # Extract benchmark name from path
         local rel_path="${file#$criterion_dir/}"
         local bench_name
@@ -253,7 +254,7 @@ parse_criterion_results() {
                 add_metric "ttfb/${bench_name}" "$mean_ms" "ms"
             fi
         fi
-    done
+    done < <(find "$criterion_dir" -name "estimates.json" -type f)
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
