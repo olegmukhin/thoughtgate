@@ -229,7 +229,7 @@ impl TestContext {
         eprintln!("\n🚨 === END OF LOG DUMP ===\n");
     }
 
-    async fn run_test(&self) -> Result<(f64, f64)> {
+    async fn run_test(&self) -> Result<(f64, f64, f64)> {
         // Deploy ConfigMap & Job
         self.kubectl(&[
             "create",
