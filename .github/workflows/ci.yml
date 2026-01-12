@@ -311,36 +311,43 @@ jobs:
           import json
           from pathlib import Path
           
-          metrics = []
+          # Use dict to deduplicate by name
+          # Bencher JSON format: {"benchmark_name": {"value": X}}
+          metrics = {}
+          
+          def add_metric(name, value):
+              """Add metric, deduplicating by name."""
+              metrics[name] = {"value": value}
           
           # Parse binary metrics
           binary_file = Path("binary_metrics.json")
           if binary_file.exists():
               with open(binary_file) as f:
-                  binary_metrics = json.load(f)
-                  metrics.extend(binary_metrics)
+                  for m in json.load(f):
+                      add_metric(m["name"], m["value"])
           
           # Parse startup metrics
           startup_file = Path("startup_metrics.json")
           if startup_file.exists():
               with open(startup_file) as f:
-                  startup_metrics = json.load(f)
-                  metrics.extend(startup_metrics)
+                  for m in json.load(f):
+                      add_metric(m["name"], m["value"])
           
           # Parse Criterion results
+          # Only look in "new" directory to avoid duplicates from base/new
           criterion_dir = Path("target/criterion")
           if criterion_dir.exists():
-              for estimates_file in criterion_dir.rglob("estimates.json"):
+              for estimates_file in criterion_dir.rglob("new/estimates.json"):
                   rel_path = estimates_file.relative_to(criterion_dir)
                   parts = rel_path.parts
                   
-                  if len(parts) < 2:
+                  if len(parts) < 3:
                       continue
                   
-                  # Build benchmark name from path
-                  bench_name = "/".join(parts[:-2]) if len(parts) > 2 else parts[0]
-                  # Clean up name for Bencher
-                  bench_name = bench_name.replace("/", "_").replace(" ", "_")
+                  # Build benchmark name from path (excluding "new" directory)
+                  # e.g., policy/eval_simple/new/estimates.json -> policy_eval_simple
+                  bench_parts = [p for p in parts[:-2] if p != "new"]
+                  bench_name = "_".join(bench_parts).replace(" ", "_")
                   
                   try:
                       with open(estimates_file) as f:
@@ -350,28 +357,20 @@ jobs:
                           # Convert to appropriate units
                           if "policy" in bench_name.lower():
                               # Policy benchmarks in microseconds
-                              metrics.append({
-                                  "name": f"policy/{bench_name}",
-                                  "value": mean_ns / 1000,  # ns to µs
-                                  "unit": "µs"
-                              })
+                              add_metric(f"policy/{bench_name}", mean_ns / 1000)
                           else:
                               # TTFB benchmarks in milliseconds
-                              metrics.append({
-                                  "name": f"ttfb/{bench_name}",
-                                  "value": mean_ns / 1_000_000,  # ns to ms
-                                  "unit": "ms"
-                              })
+                              add_metric(f"ttfb/{bench_name}", mean_ns / 1_000_000)
                   except (KeyError, json.JSONDecodeError) as e:
                       print(f"Warning: Could not parse {estimates_file}: {e}")
           
-          # Write consolidated results
+          # Write consolidated results in Bencher JSON format
           with open("bench_metrics.json", "w") as f:
               json.dump(metrics, f, indent=2)
           
           print(f"Consolidated {len(metrics)} metrics:")
-          for m in metrics:
-              print(f"  - {m['name']}: {m['value']:.3f} {m['unit']}")
+          for name, data in sorted(metrics.items()):
+              print(f"  - {name}: {data['value']:.3f}")
           PYEOF
           
           echo ""
