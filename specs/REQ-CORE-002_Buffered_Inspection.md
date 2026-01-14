@@ -5,7 +5,7 @@
 | **ID** | `REQ-CORE-002` |
 | **Title** | Buffered Inspection (Amber Path) |
 | **Type** | Core Mechanic |
-| **Status** | **DEFERRED (v0.2+)** |
+| **Status** | **DEFERRED (v0.3+)** |
 | **Priority** | Low (deferred) |
 | **Tags** | `#proxy` `#buffering` `#security` `#inspection` `#redaction` `#deferred` |
 

@@ -5,7 +5,7 @@
 | **ID** | `REQ-CORE-001` |
 | **Title** | Zero-Copy Streaming (Green Path) |
 | **Type** | Core Mechanic |
-| **Status** | **DEFERRED (v0.2+)** |
+| **Status** | **DEFERRED (v0.3+)** |
 | **Priority** | Low (deferred) |
 | **Tags** | `#proxy` `#streaming` `#performance` `#latency` `#zero-copy` `#deferred` |
 
