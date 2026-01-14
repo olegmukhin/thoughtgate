@@ -992,7 +992,10 @@ Request → Parse JSON-RPC → Route by Method
 | REQ-CORE-003 | MCP Transport & Routing | Draft | Core |
 | REQ-CORE-004 | Error Handling | Draft | Core |
 | REQ-CORE-005 | Operational Lifecycle | Draft | Core |
+| REQ-CORE-006 | Inspector Framework | **Deferred** | Core |
+| REQ-CORE-007 | SEP-1686 Protocol Compliance | Draft | Core |
 | REQ-POL-001 | Cedar Policy Engine (Gate 3) | Draft | Policy |
-| REQ-GOV-001 | Task Lifecycle & SEP-1686 | Draft (blocking mode) | Governance |
+| REQ-GOV-001 | Task Lifecycle & SEP-1686 | Draft | Governance |
 | REQ-GOV-002 | Approval Execution Pipeline | Draft (simplified) | Governance |
 | REQ-GOV-003 | Approval Integration (Gate 4) | Draft | Governance |
+| REQ-GOV-004 | Upstream Task Orchestration | Draft | Governance |

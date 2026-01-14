@@ -452,7 +452,7 @@ pub enum ApprovalDestination {
     #[serde(rename = "cli")]
     Cli,
     
-    /// External approval service (EXPERIMENTAL - v0.2+)
+    /// External approval service (EXPERIMENTAL - v0.3+)
     /// Allows integration with enterprise approval systems (ServiceNow, Jira, etc.)
     /// See Section 8.8 for webhook contract specification.
     #[serde(rename = "approval_service")]
@@ -1271,7 +1271,7 @@ This diagram shows how configuration controls the 4-gate request flow:
   │     mode: allowlist | blocklist | all                        │
   │     tools: ["pattern_*"]                                     │
   │                                                              │
-  │   If NOT visible → 404 Method Not Found                      │
+  │   If NOT visible → -32015 Tool Not Exposed                   │
   └──────────────────────────────────────────────────────────────┘
          │
          │ Tool is visible
