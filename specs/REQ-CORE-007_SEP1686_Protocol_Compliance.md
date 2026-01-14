@@ -913,6 +913,21 @@ Clients can filter by prefix if they need to distinguish ownership.
 | Upstream loses SSE on reconnect | Had SSE, reconnects without | Next initialize doesn't advertise SSE |
 | Upstream gains SSE on reconnect | No SSE, reconnects with | Next initialize advertises SSE |
 
+### 9.5 Task API Edge Cases
+
+| Scenario | Expected Behavior | Test ID |
+|----------|-------------------|---------|
+| Malformed task metadata in request | Return -32602 | EC-SEP-001 |
+| Task TTL = 0 | Reject with validation error | EC-SEP-002 |
+| Task TTL exceeds max allowed | Clamp to max, log warning | EC-SEP-003 |
+| Empty tools/list from upstream | Valid state, no tools exposed | EC-SEP-004 |
+| tasks/get for non-existent task | Return -32004 | EC-SEP-005 |
+| tasks/result for non-existent task | Return -32004 | EC-SEP-006 |
+| tasks/cancel for non-existent task | Return -32004 | EC-SEP-007 |
+| tasks/cancel for terminal task | Return -32006 (already terminal) | EC-SEP-008 |
+| tasks/result called while still Working | Block until terminal or return current | EC-SEP-009 |
+| Upstream changes capabilities on reconnect | Invalidate cache, rebuild annotations | EC-SEP-010 |
+
 ## 10. Open Questions
 
 | Question | Status | Resolution |

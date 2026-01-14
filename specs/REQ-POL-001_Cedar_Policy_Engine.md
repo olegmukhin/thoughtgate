@@ -753,6 +753,21 @@ when {
 | `test_cedar_forbid_denies` | Forbid returns error |
 | `test_yaml_config_paths` | Load from config paths |
 
+### 9.3 Edge Case Matrix
+
+| Scenario | Expected Behavior | Test ID |
+|----------|-------------------|---------|
+| Empty policy file | Valid (no policies = default deny) | EC-POL-001 |
+| Policy file not found | Fail fast at startup | EC-POL-002 |
+| Policy syntax error | Fail fast, log specific error | EC-POL-003 |
+| Policy evaluation timeout (slow query) | Return forbid, log timeout | EC-POL-004 |
+| No matching policy for request | Default deny (forbid) | EC-POL-005 |
+| Multiple permit policies match | All must permit (AND) | EC-POL-006 |
+| One forbid overrides permits | Forbid wins | EC-POL-007 |
+| Hot reload during evaluation | Complete with old policy | EC-POL-008 |
+| Policy references unknown entity | Fail at load time | EC-POL-009 |
+| Very large policy set (1000+) | Performance test target | EC-POL-010 |
+
 ## 10. Observability
 
 ### 10.1 Metrics

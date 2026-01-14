@@ -681,6 +681,23 @@ thoughtgate_approval_decision_duration_seconds{quantile}
 | `test_full_policy_forbid_flow` | action: policy → forbid → error |
 | `test_config_hot_reload` | Config changes apply without restart |
 
+### 10.3 Edge Case Matrix
+
+| Scenario | Expected Behavior | Test ID |
+|----------|-------------------|---------|
+| Unknown JSON-RPC method | Return -32601 | EC-MCP-001 |
+| Malformed JSON body | Return -32700 | EC-MCP-002 |
+| Valid JSON, invalid JSON-RPC structure | Return -32600 | EC-MCP-003 |
+| Request body exceeds size limit | Return -32600 with size error | EC-MCP-004 |
+| Batch request (array of requests) | Process each, return array | EC-MCP-005 |
+| Batch with mix of valid/invalid | Return mixed results | EC-MCP-006 |
+| Notification (null ID) | Process, no response | EC-MCP-007 |
+| SSE connection drops mid-stream | Clean up, log, close upstream | EC-MCP-008 |
+| Upstream unreachable on tools/call | Return -32000 | EC-MCP-009 |
+| Upstream timeout on tools/call | Return -32001 | EC-MCP-010 |
+| Concurrent initialize requests | Serialize, return same result | EC-MCP-011 |
+| tools/call for tool not in cached list | Re-fetch tools/list, then evaluate | EC-MCP-012 |
+
 ## 11. Error Codes
 
 | Code | Name | Gate | Description |

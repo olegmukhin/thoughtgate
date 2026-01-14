@@ -661,6 +661,14 @@ thoughtgate_task_duration_seconds{outcome}
 | Multiple pending for same principal | All tasks tracked independently | EC-TASK-006 |
 | Shutdown with pending tasks | Cancel tasks, state → Failed(-32603) | EC-TASK-007 |
 | Task TTL expiry | Task state → Expired | EC-TASK-008 |
+| tasks/cancel on already-cancelled task | Return success (idempotent) | EC-TASK-009 |
+| tasks/cancel on Completed task | Return -32006 (not cancellable) | EC-TASK-010 |
+| tasks/result on InputRequired task | Block until terminal or return status | EC-TASK-011 |
+| Concurrent tasks/result calls | First gets result, others get error | EC-TASK-012 |
+| TTL cleanup runs during task access | Atomic check, return expired if race | EC-TASK-013 |
+| TaskStore memory limit reached | Reject new tasks with -32013 | EC-TASK-014 |
+| Very rapid task creation | Apply rate limiting if enabled | EC-TASK-015 |
+| Task created with past TTL | Immediately expire | EC-TASK-016 |
 
 ### 9.2 v0.2 Assertions
 

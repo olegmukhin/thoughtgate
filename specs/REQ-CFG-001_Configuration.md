@@ -1063,6 +1063,21 @@ if !expose.is_visible(tool_name) {
 | `test_cedar_integration` | Policy paths passed to Cedar engine |
 | `test_approval_integration` | Workflow config used by approval |
 
+### 11.3 Edge Case Matrix
+
+| Scenario | Expected Behavior | Test ID |
+|----------|-------------------|---------|
+| Empty config file (0 bytes) | Fail with clear error | EC-CFG-001 |
+| Valid YAML, unsupported schema version | Fail with version error | EC-CFG-002 |
+| Env var undefined, no default (`${MISSING}`) | Fail with env var error | EC-CFG-003 |
+| Env var undefined, has default (`${MISSING:-default}`) | Use default value | EC-CFG-004 |
+| Hot reload during active request | Complete request with old config | EC-CFG-005 |
+| Hot reload with syntax error | Keep old config, log error | EC-CFG-006 |
+| Config file deleted while running | Keep old config, log warning | EC-CFG-007 |
+| Glob pattern matches zero tools | Warning, no error | EC-CFG-008 |
+| Rule matches tool that doesn't exist | Warning only, rule still valid | EC-CFG-009 |
+| Duplicate rule patterns | First match wins (no error) | EC-CFG-010 |
+
 ## 12. Observability
 
 ### 12.1 Metrics

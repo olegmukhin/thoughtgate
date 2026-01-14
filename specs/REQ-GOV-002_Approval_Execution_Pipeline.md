@@ -701,6 +701,11 @@ thoughtgate_upstream_duration_seconds
 | Upstream returns error | Return upstream error | EC-PIP-008 |
 | Upstream timeout | Return -32001 | EC-PIP-009 |
 | Upstream returns invalid JSON | Return -32002 | EC-PIP-010 |
+| Workflow changes during pending approval | Complete with original workflow | EC-PIP-011 |
+| Duplicate tool call submission | Create separate tasks (no dedup) | EC-PIP-012 |
+| Approval timeout = 0 | Immediate timeout, execute on_timeout | EC-PIP-013 |
+| Upstream returns success but empty result | Return empty result (valid) | EC-PIP-014 |
+| Upstream returns very large result | Stream without buffering | EC-PIP-015 |
 
 ### 9.2 v0.2 Assertions
 

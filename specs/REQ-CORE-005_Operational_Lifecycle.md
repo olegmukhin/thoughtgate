@@ -589,6 +589,12 @@ thoughtgate_approvals_cancelled_shutdown   # v0.2
 | Rapid restart cycles | No resource leaks | EC-OPS-012 |
 | SIGQUIT received | Immediate shutdown | EC-OPS-013 |
 | Client waiting for approval during shutdown | Receives -32603 error | EC-OPS-014 |
+| SIGTERM during startup | Abort startup, exit cleanly | EC-OPS-015 |
+| SIGKILL during operation | Immediate termination (no graceful) | EC-OPS-016 |
+| Config file deleted while running | Keep old config, log error | EC-OPS-017 |
+| Drain timeout = 0 | Immediate force shutdown | EC-OPS-018 |
+| OOM condition | Log error, exit 137 | EC-OPS-019 |
+| Health probe during shutdown | Return 503 | EC-OPS-020 |
 
 ### 9.2 v0.2 Assertions
 

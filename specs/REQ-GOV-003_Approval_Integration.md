@@ -773,6 +773,23 @@ thoughtgate_approval_timeout_total{workflow, on_timeout}
 
 ## 10. Testing Requirements
 
+### 10.0 Edge Case Matrix
+
+| Scenario | Expected Behavior | Test ID |
+|----------|-------------------|---------|
+| Slack API rate limit (429) | Backoff, retry | EC-SLK-001 |
+| Slack message deleted before reaction | Poll returns error, fail task | EC-SLK-002 |
+| Multiple reactions on same message | First reaction wins | EC-SLK-003 |
+| Conflicting reactions (👍 and 👎) | First reaction wins | EC-SLK-004 |
+| Slack token revoked | Fail task with -32603 | EC-SLK-005 |
+| Channel doesn't exist | Fail task with -32603 | EC-SLK-006 |
+| Bot lacks channel permissions | Fail task with -32603 | EC-SLK-007 |
+| Reaction from non-mentioned user | Ignore (only mentioned users count) | EC-SLK-008 |
+| Slack API 5xx error | Retry with backoff | EC-SLK-009 |
+| Slack API timeout | Retry with backoff | EC-SLK-010 |
+| Polling interval < API rate limit | Clamp to safe minimum | EC-SLK-011 |
+| Very long approval message | Truncate to Slack limits | EC-SLK-012 |
+
 ### 10.1 Unit Tests
 
 | Test | Description |

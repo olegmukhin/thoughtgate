@@ -464,3 +464,14 @@ thoughtgate_gate_denials_total{gate="approval"}
 | `test_gate3_returns_32003` | Cedar forbid returns -32003 |
 | `test_gate4_reject_returns_32007` | Rejection returns -32007 |
 | `test_gate4_timeout_returns_32008` | Timeout returns -32008 |
+
+### 9.3 Edge Case Matrix
+
+| Scenario | Expected Behavior | Test ID |
+|----------|-------------------|---------|
+| Error during error handling | Return generic -32603 | EC-ERR-001 |
+| Very long error message (>1KB) | Truncate to 1KB | EC-ERR-002 |
+| Non-UTF8 in upstream error | Replace invalid chars | EC-ERR-003 |
+| Missing correlation ID header | Generate new ID | EC-ERR-004 |
+| Multiple gates fail (hypothetical) | First gate error wins | EC-ERR-005 |
+| Error data contains sensitive info | Scrub before returning | EC-ERR-006 |
