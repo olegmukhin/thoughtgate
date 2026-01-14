@@ -778,6 +778,7 @@ when {
 | `thoughtgate_cedar_evaluation_duration_seconds` | Histogram | - | Evaluation latency |
 | `thoughtgate_cedar_reload_total` | Counter | `status` | Reload attempts |
 | `thoughtgate_cedar_policies_loaded` | Gauge | - | Current policy count |
+| `thoughtgate_policy_evaluation_cache_hits` | Counter | - | Cache effectiveness (v0.3+) |
 
 ### 10.2 Logging
 

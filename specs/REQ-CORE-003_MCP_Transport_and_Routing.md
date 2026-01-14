@@ -614,6 +614,7 @@ mcp_upstream_duration_seconds{quantile}
 mcp_connections_active
 thoughtgate_approval_started_total{workflow}
 thoughtgate_approval_decision_duration_seconds{quantile}
+thoughtgate_upstream_reconnects_total  # Track upstream connection stability
 ```
 
 **Logging:**

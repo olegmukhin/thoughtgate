@@ -302,6 +302,21 @@ The system MUST initialize in this order:
 │     • Start TTL cleanup task                                    │
 ```
 
+**Startup Dependency Graph with Failure Modes:**
+
+| Step | Component | Failure Mode | Recovery |
+|------|-----------|--------------|----------|
+| 1 | Load configuration (REQ-CFG-001) | **FAIL FAST** | Fix config, restart |
+| 2 | Initialize observability | **FAIL FAST** | Check log/metrics config |
+| 3a | Initialize TaskStore (REQ-GOV-001) | Always succeeds | In-memory, no deps |
+| 3b | Initialize Slack adapter (REQ-GOV-003) | **WARNING** | Start without approval capability |
+| 4 | Connect to upstream (REQ-CORE-003) | **WARNING** | Start, but NOT Ready |
+| 5 | Initialize Cedar engine (REQ-POL-001) | **FAIL FAST** (v0.3+) | Fix policies, restart |
+| 6 | Bind HTTP listener (REQ-CORE-003) | **FAIL FAST** | Check port conflicts |
+| 7 | Set Ready state | Only after all above | — |
+
+**Key Principle:** Components that affect request routing (config, Cedar) must fail fast. Components that affect specific features (Slack, upstream) can degrade gracefully.
+
 - **F-001.1:** Fail fast if configuration is invalid
 - **F-001.2:** Log each startup phase with timing
 - **F-001.3:** Health endpoint available before ready

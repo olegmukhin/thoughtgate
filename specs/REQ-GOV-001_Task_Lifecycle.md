@@ -622,6 +622,7 @@ See §10 for state machine reference.
 thoughtgate_tasks_pending{principal}
 thoughtgate_tasks_total{outcome="approved|rejected|timeout|expired"}
 thoughtgate_task_duration_seconds{outcome}
+thoughtgate_task_data_bytes{quantile}  # Track task payload sizes
 ```
 
 **Logging:**
@@ -646,6 +647,17 @@ thoughtgate_task_duration_seconds{outcome}
 - No orphaned executions (tool runs after task expires or is cancelled)
 - Proper cleanup on all exit paths (TTL-based expiry)
 - Graceful handling of Slack API failures
+
+### NFR-004: Memory Pressure Handling (v0.2)
+
+| Metric | Threshold | Behavior |
+|--------|-----------|----------|
+| Pending tasks | > 1000 | Reject new tasks with -32013 |
+| Task data size | > 1MB per task | Reject task with -32602 |
+| Total memory | > 80% RSS limit | Log warning, continue |
+| Total memory | > 95% RSS limit | Reject new tasks with -32013 |
+
+**Rationale:** Memory pressure can cascade to OOM kills, affecting all in-flight requests. Early rejection with clear errors is preferable to silent failures.
 
 ## 9. Verification Plan
 

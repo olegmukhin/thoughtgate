@@ -737,6 +737,7 @@ thoughtgate_approval_decisions_total{adapter, workflow, decision, method}
 thoughtgate_approval_poll_latency_seconds{adapter}
 thoughtgate_approval_decision_latency_seconds{adapter, workflow}
 thoughtgate_approval_timeout_total{workflow, on_timeout}
+thoughtgate_slack_api_latency_seconds{operation}  # Slack API performance
 ```
 
 **Logging:**

@@ -864,6 +864,39 @@ ThoughtGate watches the config file and reloads on changes:
 | Upstream becomes unreachable | Continue serving | Ready (degraded) |
 | Upstream returns after outage | Resume normal | Ready |
 
+### 12.5 Cross-Component Edge Cases
+
+Complex scenarios involving multiple components:
+
+| Scenario | Components | Behavior | Error Code |
+|----------|------------|----------|------------|
+| Policy reload during approval | POL-001 + GOV-001 | Complete with policy at approval time | — |
+| Config reload during approval | CFG-001 + GOV-003 | Complete with original workflow | — |
+| Upstream reconnect during execution | CORE-003 + GOV-002 | Fail task | -32000 |
+| Shutdown during Slack API call | CORE-005 + GOV-003 | Cancel call, fail task | -32603 |
+| TTL expiry during upstream call | GOV-001 + GOV-002 | Best-effort cancel, may execute | -32005 |
+
+**Rationale:** These edge cases ensure deterministic behavior when multiple components interact during failure or reconfiguration scenarios. The general principle is "complete with state at decision time" — once a request enters a gate, it uses the configuration/policy that was active when it entered.
+
+### 12.6 Timeout Hierarchy
+
+Timeouts at different layers and their cascade effects:
+
+| Layer | Default | Config Source | Cascade Effect |
+|-------|---------|---------------|----------------|
+| HTTP client | 30s | `THOUGHTGATE_HTTP_TIMEOUT` | Fails single request |
+| Upstream call | 30s | `sources[].timeout` | Fails task with -32001 |
+| Approval workflow | 10m | `approval.*.timeout` | Fails task with -32008 |
+| Task TTL | 1h | Client request metadata | Expires task with -32005 |
+| Slack poll interval | 5s | Calculated from timeout | Retry loop (internal) |
+| Drain timeout | 30s | `THOUGHTGATE_DRAIN_TIMEOUT` | Force shutdown |
+
+**Timeout Precedence:**
+1. Task TTL is the outer boundary — nothing survives past TTL
+2. Approval workflow timeout determines approval wait limit
+3. Upstream call timeout applies per-request to MCP server
+4. Drain timeout is the final backstop during shutdown
+
 ## 13. Glossary
 
 | Term | Definition |

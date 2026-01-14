@@ -1089,6 +1089,7 @@ if !expose.is_visible(tool_name) {
 | `thoughtgate_config_reload_total` | Counter | `status` | Hot-reload attempts |
 | `thoughtgate_rule_matches_total` | Counter | `action`, `rule` | Rule match counts |
 | `thoughtgate_validation_warnings_total` | Counter | `type` | Validation warnings |
+| `thoughtgate_config_age_seconds` | Gauge | - | Time since last config reload |
 
 ### 12.2 Logging
 
