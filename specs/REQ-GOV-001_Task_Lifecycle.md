@@ -592,19 +592,22 @@ async fn poll_for_approval(
   7. Agent retrieves result via tasks/result
 ```
 
-### F-006 to F-012: SEP-1686 Methods (v0.3+ - Deferred)
+### F-006 to F-011: SEP-1686 Task API (v0.2)
 
-These features are deferred to v0.3+:
+These features are implemented in v0.2:
 
 - **F-006:** Task creation with state machine
 - **F-007:** Dynamic poll interval computation
-- **F-008:** `tasks/get` implementation
-- **F-009:** `tasks/result` implementation
-- **F-010:** `tasks/list` with pagination
+- **F-008:** `tasks/get` implementation (status retrieval)
+- **F-009:** `tasks/result` implementation (result streaming)
+- **F-010:** `tasks/list` implementation (simple, no pagination)
 - **F-011:** `tasks/cancel` implementation
-- **F-012:** Rate limiting and capacity management
 
-See §10 for full specification reference.
+**Deferred to v0.3+:**
+- **F-012:** Rate limiting and capacity management
+- `tasks/list` pagination
+
+See §10 for state machine reference.
 
 ## 8. Non-Functional Requirements
 
