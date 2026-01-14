@@ -699,8 +699,8 @@ thoughtgate_upstream_duration_seconds
 | Approval approved, upstream succeeds | Return tool result | EC-PIP-001 |
 | Approval rejected | Return -32007 | EC-PIP-002 |
 | Approval timeout (on_timeout: deny) | Return -32008 | EC-PIP-003 |
-| Client disconnects during wait | No execution, cleanup | EC-PIP-004 |
-| Client disconnects after approval | No execution | EC-PIP-005 |
+| Task expires during approval (TTL) | Task transitions to `Failed`, no execution | EC-PIP-004 |
+| Client abandons task (never polls result) | Task cleaned up after TTL, no execution | EC-PIP-005 |
 | Slack post fails | Return -32603 | EC-PIP-006 |
 | Upstream connection fails | Return -32000 | EC-PIP-007 |
 | Upstream returns error | Return upstream error | EC-PIP-008 |

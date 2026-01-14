@@ -769,23 +769,24 @@ async fn handle_tasks_cancel(&self, params: TasksCancelParams) -> JsonRpcRespons
 
 ### 11.1 v0.2 Definition of Done
 
-- [ ] `PendingApproval` struct defined with all fields
-- [ ] `PendingApprovalStore` implemented with registration/lookup/removal
-- [ ] Blocking wait implemented with `tokio::select!`
-- [ ] Client disconnection detection working
+- [ ] `Task` struct with SEP-1686 states (`Submitted`, `Working`, `InputRequired`, `Completed`, `Failed`, `Cancelled`)
+- [ ] `TaskStore` with in-memory storage and TTL cleanup
+- [ ] State machine with valid transitions only
+- [ ] `tasks/get` — return task by ID
+- [ ] `tasks/result` — return result or block until terminal
+- [ ] `tasks/cancel` — cancel if in `InputRequired` state
+- [ ] Capability advertisement during `initialize` (advertises Task API support)
+- [ ] Tool annotation rewriting during `tools/list`
+- [ ] Background poller for approval integration (via REQ-GOV-003)
 - [ ] Timeout handling with `on_timeout` action
 - [ ] Approval decision recording from REQ-GOV-003
-- [ ] No zombie execution (tool never runs after disconnect)
-- [ ] Metrics for pending count and outcomes
+- [ ] Metrics for task count, states, and outcomes
 - [ ] All edge cases (EC-TASK-001 to EC-TASK-008) covered
 - [ ] Integration with REQ-GOV-002 (pipeline) and REQ-GOV-003 (Slack)
 
 ### 11.2 v0.3+ Definition of Done (Future)
 
-- [ ] Full Task structure with SEP-1686 states
-- [ ] State machine with valid transitions only
-- [ ] In-memory storage with TTL cleanup
-- [ ] All `tasks/*` methods implemented
+- [ ] `tasks/list` with pagination
 - [ ] Rate limiting enforced
-- [ ] Capability advertisement during initialize
-- [ ] Tool annotation rewriting during tools/list
+- [ ] SSE notifications for task state changes
+- [ ] Upstream task orchestration (REQ-GOV-004)
