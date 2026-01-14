@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1768172721876,
+  "lastUpdate": 1768359481811,
   "repoUrl": "https://github.com/olegmukhin/thoughtgate",
   "entries": {
     "Benchmark": [
@@ -543,6 +543,40 @@ window.BENCHMARK_DATA = {
           {
             "name": "ttfb/proxied/with_relay",
             "value": 11359538.393333333,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "oleg.v.mukhin@gmail.com",
+            "name": "Oleg Mukhin",
+            "username": "olegmukhin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e208c5e66c5be694392386ff144f6422b3700ed4",
+          "message": "chore(specs): update architecture and requirements for v0.2 (#25)\n\n* chore(specs): update architecture and requirements for v0.2\n\n- Increment version to v0.2 and add `#4-gate` tag in architecture.md.\n- Revise ThoughtGate description to include the 4-gate decision flow.\n- Update REQ-CORE-003 to reflect the 4-gate routing mechanism.\n- Enhance REQ-CORE-004 to include gate-specific error handling.\n- Modify REQ-GOV-001 and REQ-GOV-002 to align with the new approval workflow.\n- Adjust REQ-POL-001 to clarify Cedar's role in the decision flow.\n- Update REQ-GOV-003 to detail integration with external approval systems.\n- Ensure all specifications reflect the new architecture and decision-making process.",
+          "timestamp": "2026-01-14T02:54:47Z",
+          "tree_id": "9d53c7d4e137914289d8b212f6e4a7af115162d2",
+          "url": "https://github.com/olegmukhin/thoughtgate/commit/e208c5e66c5be694392386ff144f6422b3700ed4"
+        },
+        "date": 1768359481353,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ttfb/direct/baseline",
+            "value": 141277.63159949152,
+            "unit": "ns"
+          },
+          {
+            "name": "ttfb/proxied/with_relay",
+            "value": 11465921.45222222,
             "unit": "ns"
           }
         ]
