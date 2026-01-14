@@ -7,7 +7,7 @@
 | **Type** | Governance Component |
 | **Status** | Draft |
 | **Priority** | **Critical** |
-| **Tags** | `#governance` `#tasks` `#sep-1686` `#state-machine` `#async` `#blocking` |
+| **Tags** | `#governance` `#tasks` `#sep-1686` `#state-machine` `#async` |
 
 ## 1. Context & Decision Rationale
 
@@ -432,49 +432,45 @@ pub enum TaskStatus {
   1. Request arrives (tools/call with action: approve)
      │
      ▼
-  2. Create PendingApproval
+  2. Create Task with SEP-1686 state machine
      │
-     ├─ Generate UUID for correlation
+     ├─ Generate TaskId (UUID)
      ├─ Hash arguments for logging
-     ├─ Create completion channel
-     └─ Track client connection state
+     ├─ Set initial state: Working
+     └─ Store in TaskStore
      │
      ▼
-  3. Register with PendingApprovalStore
+  3. Return TaskId immediately to client
      │
      ▼
-  4. Post approval request to Slack (REQ-GOV-003)
+  4. Background: Post approval request to Slack (REQ-GOV-003)
      │
      ▼
-  5. Wait for outcome (blocking)
+  5. Background: Poll for approval decision
      │
      ├─────────────────────────────────────────────┐
      │                                             │
      │  Poll for:                                  │
      │  • Approval decision from Slack             │
-     │  • Timeout expiration                       │
-     │  • Client disconnection                     │
+     │  • Timeout expiration (TTL)                 │
      │                                             │
      └─────────────────────────────────────────────┘
      │
-     ├─── Approved ─────────────────────┐
-     │                                  │
-     ├─── Rejected ──► Return -32007    │
-     │                                  │
-     ├─── Timeout ───► Execute          │
-     │                 on_timeout       │
-     │                 action           │
-     │                                  │
-     └─── Disconnected ► Cleanup        │
-                        (no response)   │
-                                        │
-                                        ▼
-  6. Forward to upstream ◄──────────────┘
+     ├─── Approved ──► State → Executing ──► Forward to upstream
+     │                                        │
+     │                                        ▼
+     │                                   State → Completed
      │
-     ▼
-  7. Return response to agent
+     ├─── Rejected ──► State → Failed (rejected)
+     │
+     └─── Timeout ───► Execute on_timeout action
+                       │
+                       ├─ deny: State → Failed (timeout)
+                       └─ future: escalate, auto-approve
 
-  8. Cleanup: Remove from PendingApprovalStore
+  6. Client polls tasks/result to retrieve outcome
+
+  7. Cleanup: TTL-based expiry from TaskStore
 ```
 
 ### F-001: Pending Approval Registration (v0.2)
@@ -622,18 +618,18 @@ See §10 for state machine reference.
 ### NFR-001: Observability (v0.2)
 
 **Metrics:**
-```
-thoughtgate_approvals_pending{principal}
-thoughtgate_approvals_total{outcome="approved|rejected|timeout|disconnected"}
-thoughtgate_approval_duration_seconds{outcome}
+```text
+thoughtgate_tasks_pending{principal}
+thoughtgate_tasks_total{outcome="approved|rejected|timeout|expired"}
+thoughtgate_task_duration_seconds{outcome}
 ```
 
 **Logging:**
 ```json
-{"level":"info","event":"approval_pending","correlation_id":"abc-123","tool":"delete_user","principal":"app-xyz"}
-{"level":"info","event":"approval_complete","correlation_id":"abc-123","outcome":"approved","duration_ms":45000}
-{"level":"warn","event":"approval_timeout","correlation_id":"abc-123","tool":"delete_user","timeout_secs":600}
-{"level":"warn","event":"client_disconnected","correlation_id":"abc-123","tool":"delete_user"}
+{"level":"info","event":"task_created","task_id":"abc-123","tool":"delete_user","principal":"app-xyz"}
+{"level":"info","event":"task_completed","task_id":"abc-123","outcome":"approved","duration_ms":45000}
+{"level":"warn","event":"task_timeout","task_id":"abc-123","tool":"delete_user","timeout_secs":600}
+{"level":"warn","event":"task_expired","task_id":"abc-123","tool":"delete_user","ttl_secs":3600}
 ```
 
 ### NFR-002: Performance (v0.2)
@@ -647,8 +643,8 @@ thoughtgate_approval_duration_seconds{outcome}
 
 ### NFR-003: Reliability (v0.2)
 
-- No zombie executions (tool runs after client disconnect)
-- Proper cleanup on all exit paths
+- No orphaned executions (tool runs after task expires or is cancelled)
+- Proper cleanup on all exit paths (TTL-based expiry)
 - Graceful handling of Slack API failures
 
 ## 9. Verification Plan

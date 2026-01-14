@@ -488,33 +488,25 @@ pub async fn cancel_pending_approvals(
 }
 ```
 
-**v0.2 Behavior:**
-- On shutdown, broadcast shutdown signal to all pending approval waits
-- Each blocked `wait_for_approval` returns `ApprovalOutcome::Shutdown`
-- Pipeline maps this to -32603 error response
-- Client receives error and can resubmit to new instance
-
-**Why not "fail tasks" in v0.2?**
-- v0.2 has no task API; agent doesn't see task IDs
-- Agent sees the HTTP request fail with an error
-- Agent can retry the `tools/call` request to the new instance
-- No state to persist or transition
-
-### F-007: Pending Approval Handling on Shutdown (v0.3+ Reference)
-
-In v0.3+ SEP-1686 mode, pending tasks have state that must be handled:
+**v0.2 Behavior (SEP-1686 Task Mode):**
+- On shutdown, find all tasks in `Working` or `InputRequired`
+- Transition each to `Failed` with reason `service_shutdown`
+- Log each failed task with task_id and original tool
+- Agent will see failure when polling `tasks/result` and can resubmit
 
 | Option | Behavior | When to Use |
 |--------|----------|-------------|
-| **Fail** | Transition to `failed:shutdown` | Default |
+| **Fail** | Transition to `Failed` with `service_shutdown` | Default (v0.2) |
 | **Wait** | Brief wait for pending approvals | If approvals expected soon |
-| **Persist** | Save to external store | Future version |
+| **Persist** | Save to external store | Future version (v0.3+) |
 
-**v0.3+ Behavior (Fail):**
-- On shutdown, find all tasks in `working` or `input_required`
-- Transition each to `failed` with reason `service_shutdown`
-- Log each failed task with task_id and original tool
-- Agent will see failure when polling and can resubmit
+### F-007: Pending Task Handling on Shutdown (v0.3+ Reference)
+
+In v0.3+, additional options may be available:
+
+- **Persist:** Save pending tasks to external store for recovery
+- **Migrate:** Hand off pending tasks to another instance
+- **Drain:** Wait for all pending tasks with configurable timeout
 
 ### F-008: Upstream Health Check
 

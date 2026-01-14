@@ -246,8 +246,6 @@ pub enum PipelineResult {
     },
     /// Approval timed out
     Timeout,
-    /// Client disconnected during wait
-    ClientDisconnected,
     /// Upstream error
     UpstreamError {
         code: i32,
@@ -577,9 +575,6 @@ fn pipeline_result_to_response(result: PipelineResult, on_timeout: TimeoutAction
                 // Future: TimeoutAction::Escalate, TimeoutAction::AutoApprove
             }
         }
-        PipelineResult::ClientDisconnected => {
-            JsonRpcResponse::error(-32603, "Client disconnected", None)
-        }
         PipelineResult::UpstreamError { code, message } => {
             JsonRpcResponse::error(code, &message, None)
         }
@@ -713,8 +708,8 @@ thoughtgate_upstream_duration_seconds
 - `test_pipeline_success` — Full success path
 - `test_pipeline_rejected` — Rejection handling
 - `test_pipeline_timeout` — Timeout handling
-- `test_pipeline_client_disconnect_during_wait` — Disconnect during wait
-- `test_pipeline_client_disconnect_after_approval` — Disconnect after approval
+- `test_pipeline_task_expired` — Task TTL expiry
+- `test_pipeline_task_abandoned` — Client never polls result
 - `test_upstream_connection_error` — Connection failure
 - `test_upstream_timeout` — Execution timeout
 - `test_upstream_json_error` — JSON-RPC error from upstream

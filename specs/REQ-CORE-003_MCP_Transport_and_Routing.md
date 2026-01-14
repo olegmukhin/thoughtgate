@@ -172,11 +172,11 @@ In v0.2, approval uses **SEP-1686 task mode**:
 
 | Scenario | Behavior |
 |----------|----------|
-| Approval received, client connected | Execute tool, return result |
-| Approval received, client disconnected | Log warning, do NOT execute |
-| Timeout reached, client connected | Return `-32008 ApprovalTimeout` error |
-| Timeout reached, client disconnected | Log, clean up silently |
-| Rejection received | Return `-32007 ApprovalRejected` error |
+| Approval received | Execute tool, update task state to `Completed` |
+| Timeout reached | Update task state to `Failed`, execute `on_timeout` action |
+| Rejection received | Update task state to `Failed` with rejection reason |
+| Task expires (TTL) | Clean up task, log expiry |
+| Client polls `tasks/result` | Return current state or block until terminal |
 
 ### 5.5 Upstream Client
 
