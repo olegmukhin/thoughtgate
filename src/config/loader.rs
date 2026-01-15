@@ -96,7 +96,7 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     let contents = substitute_env_vars(&contents)?;
 
     // Step 4: Parse YAML
-    let config: Config = serde_yml::from_str(&contents)?;
+    let config: Config = serde_saphyr::from_str(&contents)?;
 
     Ok(config)
 }
@@ -348,7 +348,7 @@ governance:
 
     #[test]
     fn test_parse_minimal_config() {
-        let config: Config = serde_yml::from_str(MINIMAL_CONFIG).unwrap();
+        let config: Config = serde_saphyr::from_str(MINIMAL_CONFIG).unwrap();
         assert_eq!(config.schema, 1);
         assert_eq!(config.sources.len(), 1);
         assert_eq!(config.sources[0].id(), "upstream");
@@ -356,7 +356,7 @@ governance:
 
     #[test]
     fn test_validate_minimal_config() {
-        let config: Config = serde_yml::from_str(MINIMAL_CONFIG).unwrap();
+        let config: Config = serde_saphyr::from_str(MINIMAL_CONFIG).unwrap();
         let result = validate(&config, Version::V0_2);
         assert!(result.is_ok());
     }
@@ -370,7 +370,7 @@ governance:
   defaults:
     action: forward
 "#;
-        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
         let result = validate(&config, Version::V0_2);
         assert!(matches!(result, Err(ConfigError::NoSourcesDefined)));
     }
@@ -393,7 +393,7 @@ governance:
   defaults:
     action: forward
 "#;
-        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
         let result = validate(&config, Version::V0_2);
         assert!(matches!(result, Err(ConfigError::ReservedPrefix { .. })));
     }
@@ -413,7 +413,7 @@ governance:
     - match: "test_*"
       action: policy
 "#;
-        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
         let result = validate(&config, Version::V0_2);
         assert!(matches!(result, Err(ConfigError::MissingPolicyId { .. })));
     }
@@ -434,7 +434,7 @@ governance:
       action: approve
       approval: nonexistent
 "#;
-        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
         let result = validate(&config, Version::V0_2);
         assert!(matches!(result, Err(ConfigError::UndefinedWorkflow { .. })));
     }
@@ -454,7 +454,7 @@ governance:
     - match: "[invalid"
       action: deny
 "#;
-        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
         let result = validate(&config, Version::V0_2);
         assert!(matches!(
             result,
@@ -478,7 +478,7 @@ governance:
   defaults:
     action: forward
 "#;
-        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
         let result = validate(&config, Version::V0_2);
         assert!(matches!(
             result,
@@ -498,7 +498,7 @@ governance:
   defaults:
     action: forward
 "#;
-        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
         let result = validate(&config, Version::V0_2);
         assert!(matches!(result, Err(ConfigError::InvalidUrl { .. })));
     }
@@ -519,7 +519,7 @@ governance:
       action: forward
       policy_id: some_policy
 "#;
-        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
         let result = validate(&config, Version::V0_2).unwrap();
         assert!(!result.is_clean());
         assert!(matches!(
@@ -573,7 +573,7 @@ governance:
   defaults:
     action: forward
 "#;
-        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
         let result = validate(&config, Version::V0_2);
         assert!(matches!(
             result,
@@ -640,7 +640,7 @@ cedar:
 "##;
         // Note: Cedar policy file validation will fail unless the file exists
         // So we only test parsing here, not full validation
-        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
 
         assert_eq!(config.schema, 1);
         assert_eq!(config.sources.len(), 1);
