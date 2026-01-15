@@ -137,13 +137,15 @@ pub fn substitute_env_vars(content: &str) -> Result<String, ConfigError> {
     let mut errors = Vec::new();
 
     // Find all matches first (to avoid borrowing issues)
+    // Groups 0 and 1 are guaranteed by the regex structure, but we use
+    // ok_or for explicit error handling per coding guidelines
     let matches: Vec<_> = ENV_VAR_PATTERN
         .captures_iter(content)
-        .map(|cap| {
-            let full_match = cap.get(0).unwrap().as_str().to_string();
-            let var_name = cap.get(1).unwrap().as_str().to_string();
+        .filter_map(|cap| {
+            let full_match = cap.get(0)?.as_str().to_string();
+            let var_name = cap.get(1)?.as_str().to_string();
             let default = cap.get(2).map(|m| m.as_str().to_string());
-            (full_match, var_name, default)
+            Some((full_match, var_name, default))
         })
         .collect();
 
@@ -297,6 +299,24 @@ pub fn validate(config: &Config, version: Version) -> Result<ValidationResult, C
         }
     }
 
+    // V-014: Valid expose config glob patterns
+    for source in &config.sources {
+        if let Some(patterns) = source.expose().patterns() {
+            for pattern in patterns {
+                if let Err(e) = glob::Pattern::new(pattern) {
+                    return Err(ConfigError::InvalidGlobPattern {
+                        pattern: pattern.clone(),
+                        message: format!(
+                            "invalid expose pattern for source '{}': {}",
+                            source.id(),
+                            e
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     // V-013: Cedar policy files exist
     if let Some(ref cedar) = config.cedar {
         for path in &cedar.policies {
@@ -433,6 +453,30 @@ governance:
   rules:
     - match: "[invalid"
       action: deny
+"#;
+        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let result = validate(&config, Version::V0_2);
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidGlobPattern { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_invalid_expose_pattern() {
+        let yaml = r#"
+schema: 1
+sources:
+  - id: upstream
+    kind: mcp
+    url: http://localhost:8080
+    expose:
+      mode: allowlist
+      tools:
+        - "[invalid"
+governance:
+  defaults:
+    action: forward
 "#;
         let config: Config = serde_yml::from_str(yaml).unwrap();
         let result = validate(&config, Version::V0_2);

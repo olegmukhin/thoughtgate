@@ -206,6 +206,17 @@ impl ExposeConfig {
             }),
         }
     }
+
+    /// Get the patterns for validation.
+    ///
+    /// Returns None for All mode, Some with patterns for allowlist/blocklist.
+    pub fn patterns(&self) -> Option<&[String]> {
+        match self {
+            ExposeConfig::All => None,
+            ExposeConfig::Allowlist { tools } => Some(tools),
+            ExposeConfig::Blocklist { tools } => Some(tools),
+        }
+    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
