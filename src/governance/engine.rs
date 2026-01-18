@@ -86,6 +86,10 @@ impl Default for ApprovalEngineConfig {
 impl ApprovalEngineConfig {
     /// Load configuration from environment variables.
     ///
+    /// Implements: REQ-GOV-002/§5.1 (Environment configuration)
+    ///
+    /// Handles: Reading env vars and defaulting timeouts
+    ///
     /// # Environment Variables
     ///
     /// - `THOUGHTGATE_APPROVAL_TIMEOUT_SECS` - Approval timeout (default: 600)
@@ -177,8 +181,8 @@ impl From<TaskError> for ApprovalEngineError {
     fn from(err: TaskError) -> Self {
         match err {
             TaskError::NotFound { task_id } => Self::TaskNotFound { task_id },
-            TaskError::InvalidTransition { from, .. } => Self::InvalidState {
-                task_id: TaskId::new(), // Placeholder
+            TaskError::InvalidTransition { task_id, from, .. } => Self::InvalidState {
+                task_id,
                 status: from,
             },
             other => Self::Internal {
@@ -232,7 +236,9 @@ pub struct ApprovalEngine {
 impl ApprovalEngine {
     /// Create a new approval engine.
     ///
-    /// Implements: REQ-GOV-002/§10
+    /// Implements: REQ-GOV-002/§10 (Engine instantiation)
+    ///
+    /// Handles: Creating engine state, scheduler, and pipeline
     ///
     /// # Arguments
     ///
@@ -295,7 +301,9 @@ impl ApprovalEngine {
 
     /// Start an approval workflow.
     ///
-    /// Implements: REQ-GOV-002/F-001, F-002
+    /// Implements: REQ-GOV-002/F-001, F-002 (Task creation and approval posting)
+    ///
+    /// Handles: Starting approval workflow, creating task, posting to Slack
     ///
     /// Creates a task, posts the approval request, and returns immediately.
     /// Background polling for the decision is started automatically.
@@ -393,7 +401,9 @@ impl ApprovalEngine {
 
     /// Execute an approved task and return the result.
     ///
-    /// Implements: REQ-GOV-002/F-005, F-006
+    /// Implements: REQ-GOV-002/F-005, F-006 (Result retrieval and execution)
+    ///
+    /// Handles: Executing approved requests on upstream, handling rejections/timeouts
     ///
     /// Called when the agent requests `tasks/result`. If the task is approved,
     /// forwards the request to upstream and returns the result. If rejected or
@@ -436,6 +446,7 @@ impl ApprovalEngine {
                 return Err(ThoughtGateError::ApprovalRejected {
                     tool: task.original_request.name.clone(),
                     rejected_by: task.approval.as_ref().map(|a| a.decided_by.clone()),
+                    workflow: None, // v0.2: workflow not tracked
                 });
             }
             TaskStatus::Expired => {
@@ -445,14 +456,57 @@ impl ApprovalEngine {
                         return Err(ThoughtGateError::ApprovalTimeout {
                             tool: task.original_request.name.clone(),
                             timeout_secs: self.config.approval_timeout.as_secs(),
+                            workflow: None, // v0.2: workflow not tracked
                         });
                     }
                     TimeoutAction::Approve => {
-                        // Auto-approve - fall through to execute
+                        // Auto-approve: create synthetic approval and execute directly
+                        // Note: Expired is terminal, so we can't transition. Instead,
+                        // we create a synthetic approval record and execute the pipeline.
                         warn!(
                             task_id = %task_id,
                             "Auto-approving timed-out task (on_timeout: approve)"
                         );
+
+                        // Create synthetic approval record for pipeline execution
+                        let now = chrono::Utc::now();
+                        let synthetic_approval = super::ApprovalRecord {
+                            decision: super::ApprovalDecision::Approved,
+                            decided_by: "system:auto-approve".to_string(),
+                            decided_at: now,
+                            approval_valid_until: now
+                                + chrono::Duration::from_std(self.config.execution_timeout)
+                                    .unwrap_or(chrono::Duration::zero()),
+                            metadata: Some(serde_json::json!({
+                                "auto_approve": true,
+                                "reason": "timeout with on_timeout: approve"
+                            })),
+                        };
+
+                        // Execute the pipeline with the synthetic approval
+                        let pipeline_result = self
+                            .pipeline
+                            .execute_approved(&task, &synthetic_approval)
+                            .await;
+
+                        return match pipeline_result {
+                            PipelineResult::Success { result } => {
+                                // Note: We can't complete() the task since it's in Expired state
+                                // Just return the result
+                                info!(
+                                    task_id = %task_id,
+                                    "Auto-approved task executed successfully"
+                                );
+                                Ok(result)
+                            }
+                            PipelineResult::Failure { reason, .. } => {
+                                Err(ThoughtGateError::ServiceUnavailable {
+                                    reason: format!(
+                                        "Auto-approved task execution failed: {reason}"
+                                    ),
+                                })
+                            }
+                        };
                     }
                 }
             }
@@ -530,13 +584,16 @@ impl ApprovalEngine {
                     FailureStage::ApprovalTimeout => Err(ThoughtGateError::ApprovalTimeout {
                         tool: tool_name,
                         timeout_secs: self.config.approval_timeout.as_secs(),
+                        workflow: None, // v0.2: workflow not tracked
                     }),
                     FailureStage::ApprovalRejected => Err(ThoughtGateError::ApprovalRejected {
                         tool: tool_name,
                         rejected_by: task.approval.as_ref().map(|a| a.decided_by.clone()),
+                        workflow: None, // v0.2: workflow not tracked
                     }),
                     FailureStage::PolicyDrift => Err(ThoughtGateError::PolicyDenied {
                         tool: tool_name,
+                        policy_id: None, // v0.2: policy_id not tracked
                         reason: Some(reason),
                     }),
                     FailureStage::TransformDrift => Err(ThoughtGateError::ServiceUnavailable {

@@ -574,6 +574,7 @@ async fn evaluate_with_cedar(
             );
             Err(ThoughtGateError::PolicyDenied {
                 tool: tool_name,
+                policy_id: None, // v0.2: policy_id not tracked
                 reason: Some(reason),
             })
         }
