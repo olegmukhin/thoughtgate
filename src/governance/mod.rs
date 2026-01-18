@@ -4,29 +4,27 @@
 //!             REQ-GOV-003 (Approval Integration)
 //!
 //! This module provides task lifecycle management, execution pipeline, and approval
-//! integration for human-in-the-loop workflows. In v0.1, ThoughtGate uses **blocking
-//! mode** where HTTP connections are held until approval decisions are received.
+//! integration for human-in-the-loop workflows.
 //!
 //! ## Module Organization
 //!
 //! - `task` - Task lifecycle state machine (REQ-GOV-001)
+//! - `handlers` - SEP-1686 task method handlers (REQ-GOV-001/F-003 through F-006)
 //! - `pipeline` - Approval execution pipeline (REQ-GOV-002)
+//! - `engine` - Approval engine coordinator (REQ-GOV-002)
 //! - `approval` - External approval system integration (REQ-GOV-003)
 //!
-//! ## v0.1 Constraints
+//! ## v0.2 Features
 //!
-//! - **Blocking mode only** - No SEP-1686 task API methods exposed
+//! - **SEP-1686 Task API** - `tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`
+//! - **Async tools/call** - Optional `task` metadata enables async mode
 //! - **In-memory storage** - Tasks are lost on restart
 //! - **Polling model** - Sidecars poll for decisions (no callbacks)
-//!
-//! ## Future Versions
-//!
-//! v0.2+ will implement full SEP-1686 with:
-//! - `tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel` methods
-//! - Task capability advertisement during initialize
-//! - Tool annotation rewriting during tools/list
+//! - **Approval Engine** - Coordinates approval workflow (create, poll, execute)
 
 pub mod approval;
+pub mod engine;
+pub mod handlers;
 pub mod pipeline;
 pub mod task;
 
@@ -35,6 +33,9 @@ pub use task::{
     TaskError, TaskId, TaskStatus, TaskStore, TaskStoreConfig, TaskTransition, ToolCallRequest,
     ToolCallResult, hash_request,
 };
+
+// Re-export handler types
+pub use handlers::TaskHandler;
 
 // Re-export approval types
 pub use approval::{
@@ -47,4 +48,9 @@ pub use approval::{
 pub use pipeline::{
     ApprovalPipeline, ExecutionPipeline, PipelineConfig, PipelineError, PipelineResult,
     PreHitlResult, TransformDriftMode,
+};
+
+// Re-export engine types
+pub use engine::{
+    ApprovalEngine, ApprovalEngineConfig, ApprovalEngineError, ApprovalStartResult, TimeoutAction,
 };

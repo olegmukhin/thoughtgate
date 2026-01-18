@@ -34,8 +34,13 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 use crate::error::ThoughtGateError;
+use crate::governance::{Principal, TaskHandler, TaskStore};
+use crate::policy::engine::CedarEngine;
+use crate::policy::principal::infer_principal;
+use crate::policy::{CedarContext, CedarDecision, CedarRequest, CedarResource, TimeContext};
+use crate::protocol::{TasksCancelRequest, TasksGetRequest, TasksListRequest, TasksResultRequest};
 use crate::transport::jsonrpc::{JsonRpcResponse, McpRequest, ParsedRequests, parse_jsonrpc};
-use crate::transport::router::{McpRouter, RouteTarget};
+use crate::transport::router::{McpRouter, RouteTarget, TaskMethod};
 use crate::transport::upstream::{UpstreamClient, UpstreamConfig, UpstreamForwarder};
 
 /// Configuration for the MCP server.
@@ -111,6 +116,10 @@ pub struct AppState {
     pub upstream: Arc<dyn UpstreamForwarder>,
     /// Method router
     pub router: McpRouter,
+    /// SEP-1686 task handler
+    pub task_handler: TaskHandler,
+    /// Cedar policy engine (Gate 3)
+    pub cedar_engine: Arc<CedarEngine>,
     /// Concurrency semaphore
     pub semaphore: Arc<Semaphore>,
     /// Maximum body size in bytes
@@ -123,6 +132,26 @@ pub struct AppState {
 pub struct McpServer {
     config: McpServerConfig,
     state: Arc<AppState>,
+}
+
+/// Create governance components (TaskHandler + CedarEngine).
+///
+/// This is extracted to avoid duplication between `McpServer::new()` and
+/// `McpServer::with_upstream()`.
+fn create_governance_components() -> Result<(TaskHandler, Arc<CedarEngine>), ThoughtGateError> {
+    // Create task store and handler for SEP-1686 task methods
+    let task_store = Arc::new(TaskStore::with_defaults());
+    let task_handler = TaskHandler::new(task_store);
+
+    // Create Cedar policy engine (Gate 3)
+    let cedar_engine =
+        Arc::new(
+            CedarEngine::new().map_err(|e| ThoughtGateError::ServiceUnavailable {
+                reason: format!("Failed to create Cedar engine: {}", e),
+            })?,
+        );
+
+    Ok((task_handler, cedar_engine))
 }
 
 impl McpServer {
@@ -140,10 +169,13 @@ impl McpServer {
     pub fn new(config: McpServerConfig) -> Result<Self, ThoughtGateError> {
         let upstream = Arc::new(UpstreamClient::new(config.upstream.clone())?);
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_requests));
+        let (task_handler, cedar_engine) = create_governance_components()?;
 
         let state = Arc::new(AppState {
             upstream,
             router: McpRouter::new(),
+            task_handler,
+            cedar_engine,
             semaphore,
             max_body_size: config.max_body_size,
         });
@@ -161,17 +193,23 @@ impl McpServer {
     ///
     /// * `config` - Server configuration
     /// * `upstream` - Custom upstream forwarder implementation
-    pub fn with_upstream(config: McpServerConfig, upstream: Arc<dyn UpstreamForwarder>) -> Self {
+    pub fn with_upstream(
+        config: McpServerConfig,
+        upstream: Arc<dyn UpstreamForwarder>,
+    ) -> Result<Self, ThoughtGateError> {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_requests));
+        let (task_handler, cedar_engine) = create_governance_components()?;
 
         let state = Arc::new(AppState {
             upstream,
             router: McpRouter::new(),
+            task_handler,
+            cedar_engine,
             semaphore,
             max_body_size: config.max_body_size,
         });
 
-        Self { config, state }
+        Ok(Self { config, state })
     }
 
     /// Create the axum Router.
@@ -282,21 +320,17 @@ async fn handle_single_request(state: &AppState, request: McpRequest) -> Respons
     // Route the request
     let result = match state.router.route(request) {
         RouteTarget::PolicyEvaluation { request } => {
-            // TODO: Integrate with policy engine (REQ-POL-001)
-            // For now, pass through to upstream
-            state.upstream.forward(&request).await
+            // Implements: REQ-POL-001/F-001 (Cedar Policy Evaluation - Gate 3)
+            evaluate_with_cedar(state, request).await
         }
         RouteTarget::TaskHandler { method, request } => {
-            // TODO: Integrate with task handler (REQ-GOV-001)
-            // For now, return method not found
+            // Implements: REQ-GOV-001/F-003 through F-006 (SEP-1686 task methods)
             debug!(
                 correlation_id = %correlation_id,
                 task_method = ?method,
-                "Task handler not yet implemented"
+                "Handling task method"
             );
-            Err(ThoughtGateError::MethodNotFound {
-                method: request.method,
-            })
+            handle_task_method(&state.task_handler, method, &request)
         }
         RouteTarget::PassThrough { request } => state.upstream.forward(&request).await,
     };
@@ -317,6 +351,233 @@ async fn handle_single_request(state: &AppState, request: McpRequest) -> Respons
     match result {
         Ok(response) => json_response(&response),
         Err(e) => error_response(id, &e, &correlation_id),
+    }
+}
+
+/// Handle SEP-1686 task method requests.
+///
+/// Implements: REQ-GOV-001/F-003 through F-006
+///
+/// # Arguments
+///
+/// * `handler` - The task handler
+/// * `method` - The specific task method being called
+/// * `request` - The MCP request
+///
+/// # Returns
+///
+/// JSON-RPC response or error.
+fn handle_task_method(
+    handler: &TaskHandler,
+    method: TaskMethod,
+    request: &McpRequest,
+) -> Result<JsonRpcResponse, ThoughtGateError> {
+    // Extract params, defaulting to empty object
+    let params = request.params.clone().unwrap_or(serde_json::json!({}));
+
+    match method {
+        TaskMethod::Get => {
+            // Implements: REQ-GOV-001/F-003 (tasks/get)
+            let req: TasksGetRequest =
+                serde_json::from_value(params).map_err(|e| ThoughtGateError::InvalidParams {
+                    details: format!("Invalid tasks/get params: {}", e),
+                })?;
+
+            let result = handler
+                .handle_tasks_get(req)
+                .map_err(task_error_to_thoughtgate)?;
+
+            Ok(JsonRpcResponse::success(
+                request.id.clone(),
+                serde_json::to_value(result).map_err(|e| ThoughtGateError::ServiceUnavailable {
+                    reason: format!("Failed to serialize tasks/get response: {}", e),
+                })?,
+            ))
+        }
+
+        TaskMethod::Result => {
+            // Implements: REQ-GOV-001/F-004 (tasks/result)
+            let req: TasksResultRequest =
+                serde_json::from_value(params).map_err(|e| ThoughtGateError::InvalidParams {
+                    details: format!("Invalid tasks/result params: {}", e),
+                })?;
+
+            let result = handler
+                .handle_tasks_result(req)
+                .map_err(task_error_to_thoughtgate)?;
+
+            Ok(JsonRpcResponse::success(
+                request.id.clone(),
+                serde_json::to_value(result).map_err(|e| ThoughtGateError::ServiceUnavailable {
+                    reason: format!("Failed to serialize tasks/result response: {}", e),
+                })?,
+            ))
+        }
+
+        TaskMethod::List => {
+            // Implements: REQ-GOV-001/F-005 (tasks/list)
+            let req: TasksListRequest =
+                serde_json::from_value(params).map_err(|e| ThoughtGateError::InvalidParams {
+                    details: format!("Invalid tasks/list params: {}", e),
+                })?;
+
+            // TODO(v0.3): Extract principal from request authentication context.
+            // For v0.2, use a hardcoded default principal. When REQ-CFG-001 (YAML config)
+            // is implemented, this should use the authenticated caller identity.
+            let principal = Principal::new("default");
+
+            let result = handler.handle_tasks_list(req, &principal);
+
+            Ok(JsonRpcResponse::success(
+                request.id.clone(),
+                serde_json::to_value(result).map_err(|e| ThoughtGateError::ServiceUnavailable {
+                    reason: format!("Failed to serialize tasks/list response: {}", e),
+                })?,
+            ))
+        }
+
+        TaskMethod::Cancel => {
+            // Implements: REQ-GOV-001/F-006 (tasks/cancel)
+            let req: TasksCancelRequest =
+                serde_json::from_value(params).map_err(|e| ThoughtGateError::InvalidParams {
+                    details: format!("Invalid tasks/cancel params: {}", e),
+                })?;
+
+            let result = handler
+                .handle_tasks_cancel(req)
+                .map_err(task_error_to_thoughtgate)?;
+
+            Ok(JsonRpcResponse::success(
+                request.id.clone(),
+                serde_json::to_value(result).map_err(|e| ThoughtGateError::ServiceUnavailable {
+                    reason: format!("Failed to serialize tasks/cancel response: {}", e),
+                })?,
+            ))
+        }
+    }
+}
+
+/// Convert TaskError to ThoughtGateError.
+///
+/// Implements: REQ-CORE-004 (Error Handling)
+fn task_error_to_thoughtgate(error: crate::governance::TaskError) -> ThoughtGateError {
+    use crate::governance::TaskError;
+
+    match error {
+        TaskError::NotFound { task_id } => ThoughtGateError::TaskNotFound {
+            task_id: task_id.to_string(),
+        },
+        TaskError::Expired { task_id } => ThoughtGateError::TaskExpired {
+            task_id: task_id.to_string(),
+        },
+        TaskError::AlreadyTerminal { task_id, status } => ThoughtGateError::InvalidRequest {
+            details: format!("Task {} is already in terminal state: {}", task_id, status),
+        },
+        TaskError::InvalidTransition { task_id, from, to } => ThoughtGateError::InvalidRequest {
+            details: format!(
+                "Invalid task transition for {}: {} -> {}",
+                task_id, from, to
+            ),
+        },
+        TaskError::ConcurrentModification {
+            task_id,
+            expected,
+            actual,
+        } => ThoughtGateError::InvalidRequest {
+            details: format!(
+                "Concurrent modification of task {}: expected {}, found {}",
+                task_id, expected, actual
+            ),
+        },
+        TaskError::RateLimited { retry_after, .. } => ThoughtGateError::RateLimited {
+            retry_after_secs: Some(retry_after.as_secs()),
+        },
+        TaskError::ResultNotReady { task_id } => ThoughtGateError::TaskResultNotReady {
+            task_id: task_id.to_string(),
+        },
+        TaskError::CapacityExceeded => ThoughtGateError::ServiceUnavailable {
+            reason: "Task capacity exceeded".to_string(),
+        },
+        TaskError::Internal { details } => ThoughtGateError::ServiceUnavailable {
+            reason: format!("Internal task error: {}", details),
+        },
+    }
+}
+
+/// Evaluate a request against Cedar policy engine (Gate 3).
+///
+/// Implements: REQ-POL-001/F-001 (Policy Evaluation)
+///
+/// For `tools/call` requests, evaluates Cedar policy:
+/// - Permit → forward to upstream
+/// - Forbid → return PolicyDenied error
+///
+/// For other methods (tools/list, resources/*, prompts/*), passes through to upstream.
+async fn evaluate_with_cedar(
+    state: &AppState,
+    request: McpRequest,
+) -> Result<JsonRpcResponse, ThoughtGateError> {
+    // Only evaluate tools/call requests with Cedar
+    if request.method != "tools/call" {
+        // For tools/list, resources/*, prompts/* - pass through to upstream
+        return state.upstream.forward(&request).await;
+    }
+
+    // Extract tool name and arguments from params
+    let params = request.params.clone().unwrap_or(serde_json::json!({}));
+    let tool_name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    // Infer principal from environment
+    let policy_principal = infer_principal().map_err(|e| ThoughtGateError::ServiceUnavailable {
+        reason: format!("Failed to infer principal: {}", e),
+    })?;
+
+    // Build Cedar request
+    let cedar_request = CedarRequest {
+        principal: policy_principal,
+        resource: CedarResource::ToolCall {
+            name: tool_name.clone(),
+            server: "upstream".to_string(), // v0.2: single upstream
+            arguments,
+        },
+        context: CedarContext {
+            policy_id: "default".to_string(), // v0.2: no YAML governance rules
+            source_id: "upstream".to_string(),
+            time: TimeContext::now(),
+        },
+    };
+
+    // Evaluate Cedar policy
+    match state.cedar_engine.evaluate_v2(&cedar_request) {
+        CedarDecision::Permit { .. } => {
+            // v0.2: Permit means forward immediately (no approval workflow)
+            debug!(
+                tool = %tool_name,
+                "Cedar permit - forwarding to upstream"
+            );
+            state.upstream.forward(&request).await
+        }
+        CedarDecision::Forbid { reason, .. } => {
+            // Cedar forbid → return PolicyDenied error
+            warn!(
+                tool = %tool_name,
+                reason = %reason,
+                "Cedar forbid - denying request"
+            );
+            Err(ThoughtGateError::PolicyDenied {
+                tool: tool_name,
+                policy_id: None, // v0.2: policy_id not tracked
+                reason: Some(reason),
+            })
+        }
     }
 }
 
@@ -351,11 +612,9 @@ async fn handle_batch_request(state: &AppState, requests: Vec<McpRequest>) -> Re
         let correlation_id = request.correlation_id.to_string();
 
         let result = match state.router.route(request) {
-            RouteTarget::PolicyEvaluation { request } => state.upstream.forward(&request).await,
-            RouteTarget::TaskHandler { method: _, request } => {
-                Err(ThoughtGateError::MethodNotFound {
-                    method: request.method,
-                })
+            RouteTarget::PolicyEvaluation { request } => evaluate_with_cedar(state, request).await,
+            RouteTarget::TaskHandler { method, request } => {
+                handle_task_method(&state.task_handler, method, &request)
             }
             RouteTarget::PassThrough { request } => state.upstream.forward(&request).await,
         };
@@ -461,6 +720,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use serial_test::serial;
     use tower::ServiceExt;
 
     /// Mock upstream for testing.
@@ -490,9 +750,15 @@ mod tests {
     }
 
     fn create_test_state() -> Arc<AppState> {
+        let task_store = Arc::new(TaskStore::with_defaults());
+        let task_handler = TaskHandler::new(task_store);
+        let cedar_engine = Arc::new(CedarEngine::new().expect("Failed to create Cedar engine"));
+
         Arc::new(AppState {
             upstream: Arc::new(MockUpstream),
             router: McpRouter::new(),
+            task_handler,
+            cedar_engine,
             semaphore: Arc::new(Semaphore::new(100)),
             max_body_size: 1024 * 1024,
         })
@@ -652,9 +918,15 @@ mod tests {
     #[tokio::test]
     async fn test_max_concurrency() {
         // Create state with 0 permits
+        let task_store = Arc::new(TaskStore::with_defaults());
+        let task_handler = TaskHandler::new(task_store);
+        let cedar_engine = Arc::new(CedarEngine::new().expect("Failed to create Cedar engine"));
+
         let state = Arc::new(AppState {
             upstream: Arc::new(MockUpstream),
             router: McpRouter::new(),
+            task_handler,
+            cedar_engine,
             semaphore: Arc::new(Semaphore::new(0)), // No permits available
             max_body_size: 1024 * 1024,
         });
@@ -681,9 +953,15 @@ mod tests {
     #[tokio::test]
     async fn test_body_size_limit() {
         // Create state with small body limit
+        let task_store = Arc::new(TaskStore::with_defaults());
+        let task_handler = TaskHandler::new(task_store);
+        let cedar_engine = Arc::new(CedarEngine::new().expect("Failed to create Cedar engine"));
+
         let state = Arc::new(AppState {
             upstream: Arc::new(MockUpstream),
             router: McpRouter::new(),
+            task_handler,
+            cedar_engine,
             semaphore: Arc::new(Semaphore::new(100)),
             max_body_size: 10, // Very small limit
         });
@@ -809,5 +1087,343 @@ mod tests {
         assert_eq!(config.listen_addr, "0.0.0.0:8080");
         assert_eq!(config.max_body_size, 1024 * 1024);
         assert_eq!(config.max_concurrent_requests, 10000);
+    }
+
+    // ========================================================================
+    // SEP-1686 Task Handler Integration Tests
+    // ========================================================================
+
+    /// Verifies: REQ-GOV-001/F-005 (tasks/list routing)
+    #[tokio::test]
+    async fn test_tasks_list_routing() {
+        let state = create_test_state();
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state);
+
+        // Request tasks/list - should route to TaskHandler and return empty list
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tasks/list"}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        // Should be a success response with empty tasks array
+        assert!(parsed.get("result").is_some(), "Should have result");
+        let result = &parsed["result"];
+        assert!(result.get("tasks").is_some(), "Should have tasks array");
+        assert!(
+            result["tasks"].as_array().unwrap().is_empty(),
+            "Tasks should be empty"
+        );
+    }
+
+    /// Verifies: REQ-GOV-001/F-003 (tasks/get routing - task not found)
+    #[tokio::test]
+    async fn test_tasks_get_not_found() {
+        let state = create_test_state();
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state);
+
+        // Request tasks/get with non-existent task ID
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{"taskId":"tg_nonexistent12345678"}}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        // Should be an error response with task not found code
+        assert!(parsed.get("error").is_some(), "Should have error");
+        let error = &parsed["error"];
+        assert_eq!(
+            error["code"].as_i64().unwrap(),
+            -32004,
+            "Should be TaskNotFound error code"
+        );
+    }
+
+    /// Verifies: REQ-GOV-001/F-006 (tasks/cancel routing - task not found)
+    #[tokio::test]
+    async fn test_tasks_cancel_not_found() {
+        let state = create_test_state();
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state);
+
+        // Request tasks/cancel with non-existent task ID
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tasks/cancel","params":{"taskId":"tg_nonexistent12345678"}}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        // Should be an error response with task not found code
+        assert!(parsed.get("error").is_some(), "Should have error");
+        let error = &parsed["error"];
+        assert_eq!(
+            error["code"].as_i64().unwrap(),
+            -32004,
+            "Should be TaskNotFound error code"
+        );
+    }
+
+    /// Verifies: REQ-GOV-001/F-004 (tasks/result routing - task not found)
+    #[tokio::test]
+    async fn test_tasks_result_not_found() {
+        let state = create_test_state();
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state);
+
+        // Request tasks/result with non-existent task ID
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tasks/result","params":{"taskId":"tg_nonexistent12345678"}}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        // Should be an error response with task not found code
+        assert!(parsed.get("error").is_some(), "Should have error");
+        let error = &parsed["error"];
+        assert_eq!(
+            error["code"].as_i64().unwrap(),
+            -32004,
+            "Should be TaskNotFound error code"
+        );
+    }
+
+    /// Verifies: REQ-GOV-001/F-003 (tasks/get - invalid params)
+    #[tokio::test]
+    async fn test_tasks_get_invalid_params() {
+        let state = create_test_state();
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state);
+
+        // Request tasks/get with missing taskId
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{}}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        // Should be an error response with invalid params code
+        assert!(parsed.get("error").is_some(), "Should have error");
+        let error = &parsed["error"];
+        assert_eq!(
+            error["code"].as_i64().unwrap(),
+            -32602,
+            "Should be InvalidParams error code"
+        );
+    }
+
+    // ========================================================================
+    // Cedar Policy Integration Tests (Gate 3)
+    // ========================================================================
+
+    /// Helper to create test state with custom Cedar policy.
+    fn create_test_state_with_policy(policy: &str) -> Arc<AppState> {
+        // Set policy env var (caller must use #[serial] and clean up)
+        unsafe {
+            std::env::set_var("THOUGHTGATE_DEV_MODE", "true");
+            std::env::set_var("THOUGHTGATE_POLICIES", policy);
+        }
+
+        let task_store = Arc::new(TaskStore::with_defaults());
+        let task_handler = TaskHandler::new(task_store);
+        let cedar_engine = Arc::new(CedarEngine::new().expect("Failed to create Cedar engine"));
+
+        Arc::new(AppState {
+            upstream: Arc::new(MockUpstream),
+            router: McpRouter::new(),
+            task_handler,
+            cedar_engine,
+            semaphore: Arc::new(Semaphore::new(100)),
+            max_body_size: 1024 * 1024,
+        })
+    }
+
+    /// Verifies: REQ-POL-001/F-001 (Cedar permit → forward to upstream)
+    #[tokio::test]
+    #[serial]
+    async fn test_tools_call_cedar_permit() {
+        // Policy that permits all tools/call requests
+        let policy = r#"
+            permit(
+                principal,
+                action == ThoughtGate::Action::"tools/call",
+                resource
+            );
+        "#;
+
+        let state = create_test_state_with_policy(policy);
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state);
+
+        // Request tools/call - should be permitted and forwarded
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        // Should be a success response (mock upstream returns {"mock":"response"})
+        assert!(
+            parsed.get("result").is_some(),
+            "Should have result (permit → forward)"
+        );
+        assert_eq!(parsed["result"]["mock"], "response");
+
+        unsafe {
+            std::env::remove_var("THOUGHTGATE_DEV_MODE");
+            std::env::remove_var("THOUGHTGATE_POLICIES");
+        }
+    }
+
+    /// Verifies: REQ-POL-001/F-001 (Cedar forbid → PolicyDenied error)
+    #[tokio::test]
+    #[serial]
+    async fn test_tools_call_cedar_forbid() {
+        // Policy that only permits a different principal
+        let policy = r#"
+            permit(
+                principal == ThoughtGate::App::"other-app",
+                action == ThoughtGate::Action::"tools/call",
+                resource
+            );
+        "#;
+
+        let state = create_test_state_with_policy(policy);
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state);
+
+        // Request tools/call - should be forbidden (dev-app != other-app)
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_user","arguments":{}}}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        // Should be a PolicyDenied error (-32003)
+        assert!(parsed.get("error").is_some(), "Should have error (forbid)");
+        let error = &parsed["error"];
+        assert_eq!(
+            error["code"].as_i64().unwrap(),
+            -32003,
+            "Should be PolicyDenied error code"
+        );
+        assert!(
+            error["message"].as_str().unwrap().contains("denied"),
+            "Error message should mention denial"
+        );
+
+        unsafe {
+            std::env::remove_var("THOUGHTGATE_DEV_MODE");
+            std::env::remove_var("THOUGHTGATE_POLICIES");
+        }
+    }
+
+    /// Verifies: REQ-POL-001 (tools/list passes through without Cedar evaluation)
+    #[tokio::test]
+    #[serial]
+    async fn test_tools_list_bypasses_cedar() {
+        // Restrictive policy that denies everything
+        let policy = r#"
+            permit(
+                principal == ThoughtGate::App::"nonexistent",
+                action,
+                resource
+            );
+        "#;
+
+        let state = create_test_state_with_policy(policy);
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state);
+
+        // Request tools/list - should bypass Cedar and forward to upstream
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        // Should be a success response (tools/list bypasses Cedar)
+        assert!(
+            parsed.get("result").is_some(),
+            "Should have result (tools/list bypasses Cedar)"
+        );
+
+        unsafe {
+            std::env::remove_var("THOUGHTGATE_DEV_MODE");
+            std::env::remove_var("THOUGHTGATE_POLICIES");
+        }
     }
 }

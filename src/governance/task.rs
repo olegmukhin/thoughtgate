@@ -9,11 +9,15 @@
 //! - TTL enforcement and expiration cleanup
 //! - Rate limiting per principal
 //!
-//! ## v0.1 Constraints
+//! ## v0.2 Updates
 //!
-//! - **Blocking mode** - Tasks track internal state only
+//! - **SEP-1686 Task IDs** - Tasks use `tg_<nanoid>` format for SEP-1686 compliance
+//! - **Task method handlers** - `tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`
+//! - **Status conversion** - `TaskStatus` ↔ `Sep1686Status`
+//!
+//! ## Constraints
+//!
 //! - **In-memory storage** - Tasks are lost on restart
-//! - **No SEP-1686 API** - tasks/* methods not exposed
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -24,39 +28,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Notify;
-use uuid::Uuid;
 
-// ============================================================================
-// Task ID
-// ============================================================================
-
-/// Unique identifier for a task.
-///
-/// Implements: REQ-GOV-001/F-002.1
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct TaskId(pub Uuid);
-
-impl TaskId {
-    /// Creates a new random task ID.
-    ///
-    /// Implements: REQ-GOV-001/F-002.1
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for TaskId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for TaskId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+// Re-export Sep1686TaskId as TaskId for v0.2 compatibility
+pub use crate::protocol::Sep1686TaskId as TaskId;
 
 // ============================================================================
 // JSON-RPC ID (for MCP request tracking)
@@ -334,6 +308,28 @@ impl std::fmt::Display for TaskStatus {
             Self::Rejected => write!(f, "rejected"),
             Self::Cancelled => write!(f, "cancelled"),
             Self::Expired => write!(f, "expired"),
+        }
+    }
+}
+
+/// Convert internal TaskStatus to SEP-1686 wire format status.
+///
+/// Implements: REQ-GOV-001/§6.2, REQ-CORE-007/§6.6
+///
+/// Mappings:
+/// - Working, Executing → Working (Executing is internal-only)
+/// - InputRequired → InputRequired
+/// - Completed → Completed
+/// - Failed, Rejected, Expired → Failed (all error terminal states)
+/// - Cancelled → Cancelled
+impl From<TaskStatus> for crate::protocol::Sep1686Status {
+    fn from(status: TaskStatus) -> Self {
+        match status {
+            TaskStatus::Working | TaskStatus::Executing => Self::Working,
+            TaskStatus::InputRequired => Self::InputRequired,
+            TaskStatus::Completed => Self::Completed,
+            TaskStatus::Failed | TaskStatus::Rejected | TaskStatus::Expired => Self::Failed,
+            TaskStatus::Cancelled => Self::Cancelled,
         }
     }
 }
@@ -1438,7 +1434,10 @@ mod tests {
         );
 
         assert_eq!(task.status, TaskStatus::Working);
-        assert!(!task.id.0.is_nil());
+        assert!(
+            task.id.is_thoughtgate_owned(),
+            "Task ID should be ThoughtGate-owned"
+        );
         assert!(task.transitions.is_empty());
         assert!(task.approval.is_none());
         assert!(task.result.is_none());
