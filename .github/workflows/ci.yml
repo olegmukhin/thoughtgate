@@ -206,6 +206,7 @@ jobs:
     name: Benchmarks
     runs-on: ubuntu-latest
     needs: quick-checks
+    continue-on-error: true  # Allow CI to pass while new baselines are established
     permissions:
       pull-requests: write  # Needed to post PR comments
     
