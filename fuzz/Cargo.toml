@@ -18,53 +18,72 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
 bytes = "1"
 async-trait = "0.1"
+serde_json = "1"
+chrono = "0.4"
 
 [dependencies.thoughtgate]
 path = ".."
 features = ["fuzzing", "amber_path"]
 
-# Prevent this from interfering with normal builds
-[[bin]]
-name = "peeking_fuzz"
-path = "fuzz_targets/peeking_fuzz.rs"
-test = false
-doc = false
-
+# URI parsing and Host header injection
 [[bin]]
 name = "fuzz_uri_parsing"
 path = "fuzz_targets/fuzz_uri_parsing.rs"
 test = false
 doc = false
 
+# Header redaction for logging security
 [[bin]]
 name = "fuzz_header_redaction"
 path = "fuzz_targets/fuzz_header_redaction.rs"
 test = false
 doc = false
 
+# End-to-end HTTP request handling
 [[bin]]
 name = "fuzz_full_request"
 path = "fuzz_targets/fuzz_full_request.rs"
 test = false
 doc = false
 
-# REQ-CORE-002: Amber Path fuzzing
-[[bin]]
-name = "fuzz_amber_path"
-path = "fuzz_targets/fuzz_amber_path.rs"
-test = false
-doc = false
-
-# REQ-CORE-001: Green Path fuzzing
+# REQ-CORE-001: Green Path streaming
 [[bin]]
 name = "fuzz_green_path"
 path = "fuzz_targets/fuzz_green_path.rs"
 test = false
 doc = false
 
-# REQ-CORE-002: Inspector chain fuzzing
+# REQ-CORE-002: Inspector chain semantics
 [[bin]]
 name = "fuzz_inspector_chain"
 path = "fuzz_targets/fuzz_inspector_chain.rs"
+test = false
+doc = false
+
+# REQ-CORE-003: JSON-RPC 2.0 parsing (Critical)
+[[bin]]
+name = "fuzz_jsonrpc"
+path = "fuzz_targets/fuzz_jsonrpc.rs"
+test = false
+doc = false
+
+# REQ-POL-001: Cedar policy evaluation (Critical)
+[[bin]]
+name = "fuzz_cedar_policy"
+path = "fuzz_targets/fuzz_cedar_policy.rs"
+test = false
+doc = false
+
+# REQ-GOV-001: Task lifecycle state machine (Medium)
+[[bin]]
+name = "fuzz_task_lifecycle"
+path = "fuzz_targets/fuzz_task_lifecycle.rs"
+test = false
+doc = false
+
+# REQ-CFG-001: Configuration parsing (Medium)
+[[bin]]
+name = "fuzz_config"
+path = "fuzz_targets/fuzz_config.rs"
 test = false
 doc = false
