@@ -439,10 +439,11 @@ governance:
         assert!(matches!(result, Err(ConfigError::UndefinedWorkflow { .. })));
     }
 
+    /// Regression test: "default" workflow name is NOT special-cased.
+    /// If a rule references `approval: default`, a workflow named "default" must be
+    /// explicitly defined in the approval section.
     #[test]
-    fn test_validate_undefined_default_workflow() {
-        // Regression test: "default" workflow name should NOT be special-cased
-        // If a rule references `approval: default`, the "default" workflow must exist
+    fn test_validate_default_workflow_must_be_defined() {
         let yaml = r#"
 schema: 1
 sources:

@@ -132,9 +132,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Reserve inbound port (7468) - dummy socket, not wired to anything
-    // This reserves the port for future callback/webhook functionality
+    // This reserves the port for future callback/webhook functionality.
+    // IMPORTANT: This listener must be kept alive (not dropped) to hold the port.
+    // The #[allow(unused)] silences the warning while keeping the socket open.
     let inbound_port_val = inbound_port();
-    let _inbound_listener = TcpListener::bind(format!("0.0.0.0:{}", inbound_port_val)).await?;
+    #[allow(unused)]
+    let inbound_listener = TcpListener::bind(format!("0.0.0.0:{}", inbound_port_val)).await?;
     info!(
         inbound_port = inbound_port_val,
         "Inbound port reserved (not wired)"

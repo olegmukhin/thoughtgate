@@ -247,7 +247,13 @@ impl ProxyService {
                     return Response::builder()
                         .status(StatusCode::PAYLOAD_TOO_LARGE)
                         .header(header::CONTENT_TYPE, "application/json")
-                        .body(body.map_err(|e| match e {}).boxed())
+                        // Full<Bytes> has Infallible error type - this closure is never called
+                        .body(
+                            body.map_err(
+                                |infallible: std::convert::Infallible| match infallible {},
+                            )
+                            .boxed(),
+                        )
                         .map_err(|e| ProxyError::Connection(e.to_string()));
                 }
                 bytes
@@ -268,10 +274,15 @@ impl ProxyService {
         let (status, response_bytes) = mcp_handler.handle(body_bytes).await;
 
         // Build unified response directly from bytes
+        // Full<Bytes> has Infallible error type - this closure is never called
         Response::builder()
             .status(status)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Full::new(response_bytes).map_err(|e| match e {}).boxed())
+            .body(
+                Full::new(response_bytes)
+                    .map_err(|infallible: std::convert::Infallible| match infallible {})
+                    .boxed(),
+            )
             .map_err(|e| ProxyError::Connection(e.to_string()))
     }
 
@@ -696,6 +707,7 @@ fn map_hyper_error(e: hyper_util::client::legacy::Error) -> ProxyError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traffic::{TrafficType, discriminate_traffic};
     use http::{HeaderMap, Method, Version};
 
     /// Test URI extraction in reverse proxy mode
@@ -912,5 +924,137 @@ mod tests {
             Err(ProxyError::InvalidUri(_)) => {} // Expected
             _ => panic!("Expected InvalidUri error"),
         }
+    }
+
+    // =========================================================================
+    // Traffic Discrimination Tests (REQ-CORE-003/F-002)
+    // =========================================================================
+
+    /// Test that MCP traffic (POST /mcp/v1 with JSON) is detected correctly.
+    ///
+    /// # Traceability
+    /// - Implements: REQ-CORE-003/F-002 (MCP Traffic Detection)
+    #[test]
+    fn test_traffic_discrimination_mcp_traffic() {
+        // Standard MCP request to /mcp/v1
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp/v1")
+            .header("content-type", "application/json")
+            .body(())
+            .unwrap();
+
+        assert_eq!(discriminate_traffic(&req), TrafficType::Mcp);
+    }
+
+    /// Test that MCP traffic to root path is detected correctly.
+    ///
+    /// # Traceability
+    /// - Implements: REQ-CORE-003/F-002 (MCP Traffic Detection)
+    #[test]
+    fn test_traffic_discrimination_mcp_root_path() {
+        // MCP request to root path (for simple deployments)
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(())
+            .unwrap();
+
+        assert_eq!(discriminate_traffic(&req), TrafficType::Mcp);
+    }
+
+    /// Test that HTTP traffic (non-MCP) is detected correctly.
+    ///
+    /// # Traceability
+    /// - Implements: REQ-CORE-003/F-002 (MCP Traffic Detection)
+    #[test]
+    fn test_traffic_discrimination_http_traffic() {
+        // GET request (not MCP)
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/status")
+            .body(())
+            .unwrap();
+
+        assert_eq!(discriminate_traffic(&req), TrafficType::Http);
+    }
+
+    /// Test that POST to non-MCP paths is HTTP traffic.
+    ///
+    /// # Traceability
+    /// - Implements: REQ-CORE-003/F-002 (MCP Traffic Detection)
+    #[test]
+    fn test_traffic_discrimination_post_non_mcp_path() {
+        // POST to non-MCP path
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/data")
+            .header("content-type", "application/json")
+            .body(())
+            .unwrap();
+
+        assert_eq!(discriminate_traffic(&req), TrafficType::Http);
+    }
+
+    /// Test that POST to /mcp/v1 without JSON content-type is HTTP traffic.
+    ///
+    /// # Traceability
+    /// - Implements: REQ-CORE-003/F-002 (MCP Traffic Detection)
+    #[test]
+    fn test_traffic_discrimination_mcp_path_wrong_content_type() {
+        // POST to /mcp/v1 but with wrong content-type
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp/v1")
+            .header("content-type", "text/plain")
+            .body(())
+            .unwrap();
+
+        assert_eq!(discriminate_traffic(&req), TrafficType::Http);
+    }
+
+    /// Test that POST to /mcp/v1 without content-type header is HTTP traffic.
+    ///
+    /// # Traceability
+    /// - Implements: REQ-CORE-003/F-002 (MCP Traffic Detection)
+    #[test]
+    fn test_traffic_discrimination_mcp_path_no_content_type() {
+        // POST to /mcp/v1 but missing content-type
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp/v1")
+            .body(())
+            .unwrap();
+
+        assert_eq!(discriminate_traffic(&req), TrafficType::Http);
+    }
+
+    /// Test MCP handler configuration.
+    #[test]
+    fn test_mcp_handler_configuration() {
+        let service =
+            ProxyService::new_with_upstream(Some("https://upstream.example.com".to_string()))
+                .expect("Failed to create proxy service");
+
+        // By default, no MCP handler
+        assert!(!service.has_mcp_handler());
+    }
+
+    /// Test MCP traffic with content-type charset is still detected.
+    ///
+    /// # Traceability
+    /// - Implements: REQ-CORE-003/F-002 (MCP Traffic Detection)
+    #[test]
+    fn test_traffic_discrimination_mcp_content_type_with_charset() {
+        // POST to /mcp/v1 with charset in content-type
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp/v1")
+            .header("content-type", "application/json; charset=utf-8")
+            .body(())
+            .unwrap();
+
+        assert_eq!(discriminate_traffic(&req), TrafficType::Mcp);
     }
 }
