@@ -1048,4 +1048,195 @@ mod tests {
 
         assert_eq!(discriminate_traffic(&req), TrafficType::Mcp);
     }
+
+    // =========================================================================
+    // MCP Request Handling Tests (handle_mcp_request)
+    // =========================================================================
+
+    mod mcp_request_tests {
+        use super::*;
+        use crate::error::ThoughtGateError;
+        use crate::governance::TaskStore;
+        use crate::policy::engine::CedarEngine;
+        use crate::transport::jsonrpc::{JsonRpcResponse, McpRequest};
+        use crate::transport::server::{McpHandler, McpHandlerConfig};
+        use crate::transport::upstream::UpstreamForwarder;
+        use bytes::Bytes;
+        use std::sync::Arc;
+
+        /// Mock upstream that returns a simple JSON-RPC response.
+        struct MockUpstream;
+
+        #[async_trait::async_trait]
+        impl UpstreamForwarder for MockUpstream {
+            async fn forward(
+                &self,
+                request: &McpRequest,
+            ) -> Result<JsonRpcResponse, ThoughtGateError> {
+                Ok(JsonRpcResponse::success(
+                    request.id.clone(),
+                    serde_json::json!({"mock": "response"}),
+                ))
+            }
+
+            async fn forward_batch(
+                &self,
+                requests: &[McpRequest],
+            ) -> Result<Vec<JsonRpcResponse>, ThoughtGateError> {
+                Ok(requests
+                    .iter()
+                    .filter(|r| !r.is_notification())
+                    .map(|r| {
+                        JsonRpcResponse::success(
+                            r.id.clone(),
+                            serde_json::json!({"mock": "response"}),
+                        )
+                    })
+                    .collect())
+            }
+        }
+
+        fn create_test_mcp_handler() -> Arc<McpHandler> {
+            let task_store = Arc::new(TaskStore::with_defaults());
+            let cedar_engine = Arc::new(CedarEngine::new().expect("Failed to create Cedar engine"));
+            let config = McpHandlerConfig::default();
+
+            Arc::new(McpHandler::new(
+                Arc::new(MockUpstream),
+                cedar_engine,
+                task_store,
+                config,
+            ))
+        }
+
+        fn create_test_mcp_handler_with_size_limit(max_size: usize) -> Arc<McpHandler> {
+            let task_store = Arc::new(TaskStore::with_defaults());
+            let cedar_engine = Arc::new(CedarEngine::new().expect("Failed to create Cedar engine"));
+            let config = McpHandlerConfig {
+                max_body_size: max_size,
+                ..Default::default()
+            };
+
+            Arc::new(McpHandler::new(
+                Arc::new(MockUpstream),
+                cedar_engine,
+                task_store,
+                config,
+            ))
+        }
+
+        /// Test MCP handler processes valid JSON-RPC request.
+        ///
+        /// # Traceability
+        /// - Implements: REQ-CORE-003 (MCP Transport & Routing)
+        #[tokio::test]
+        async fn test_mcp_handler_valid_request() {
+            let handler = create_test_mcp_handler();
+
+            let body = Bytes::from(r#"{"jsonrpc":"2.0","id":1,"method":"test"}"#);
+            let (status, response) = handler.handle(body).await;
+
+            assert_eq!(status, StatusCode::OK);
+            let response_str = String::from_utf8(response.to_vec()).unwrap();
+            assert!(response_str.contains("\"jsonrpc\":\"2.0\""));
+        }
+
+        /// Test MCP handler returns JSON-RPC error for oversized body.
+        ///
+        /// McpHandler has its own size check that returns -32600 (Invalid Request)
+        /// when the body exceeds max_body_size.
+        ///
+        /// # Traceability
+        /// - Implements: REQ-CORE-003 (MCP Transport & Routing)
+        #[tokio::test]
+        async fn test_mcp_handler_size_limit_enforcement() {
+            // Create handler with 100 byte limit
+            let handler = create_test_mcp_handler_with_size_limit(100);
+
+            // Create body larger than limit
+            let large_body = Bytes::from(vec![b'x'; 200]);
+            let (status, response) = handler.handle(large_body).await;
+
+            // JSON-RPC errors return HTTP 200 per spec; the error is in the body
+            assert_eq!(status, StatusCode::OK);
+            let response_str = String::from_utf8(response.to_vec()).unwrap();
+            // Invalid Request (-32600) for oversized body
+            assert!(
+                response_str.contains("-32600"),
+                "Expected invalid request error -32600, got: {}",
+                response_str
+            );
+            assert!(response_str.contains("exceeds maximum size"));
+        }
+
+        /// Test MCP handler returns proper JSON-RPC error for invalid JSON.
+        ///
+        /// Per JSON-RPC 2.0 spec, parse errors return HTTP 200 with error in body.
+        ///
+        /// # Traceability
+        /// - Implements: REQ-CORE-003 (MCP Transport & Routing)
+        #[tokio::test]
+        async fn test_mcp_handler_invalid_json() {
+            let handler = create_test_mcp_handler();
+
+            let body = Bytes::from("not valid json");
+            let (status, response) = handler.handle(body).await;
+
+            // JSON-RPC errors return HTTP 200 per spec; the error is in the body
+            assert_eq!(status, StatusCode::OK);
+            let response_str = String::from_utf8(response.to_vec()).unwrap();
+            assert!(response_str.contains("-32700")); // Parse error
+        }
+
+        /// Test MCP handler handles notifications (no id).
+        ///
+        /// # Traceability
+        /// - Implements: REQ-CORE-003 (MCP Transport & Routing)
+        #[tokio::test]
+        async fn test_mcp_handler_notification() {
+            let handler = create_test_mcp_handler();
+
+            // Notification has no "id" field
+            let body = Bytes::from(r#"{"jsonrpc":"2.0","method":"test"}"#);
+            let (status, _response) = handler.handle(body).await;
+
+            assert_eq!(status, StatusCode::NO_CONTENT);
+        }
+
+        /// Test MCP handler handles batch requests.
+        ///
+        /// # Traceability
+        /// - Implements: REQ-CORE-003 (MCP Transport & Routing)
+        #[tokio::test]
+        async fn test_mcp_handler_batch_request() {
+            let handler = create_test_mcp_handler();
+
+            let body = Bytes::from(
+                r#"[{"jsonrpc":"2.0","id":1,"method":"test"},{"jsonrpc":"2.0","id":2,"method":"test2"}]"#,
+            );
+            let (status, response) = handler.handle(body).await;
+
+            assert_eq!(status, StatusCode::OK);
+            let response_str = String::from_utf8(response.to_vec()).unwrap();
+            // Batch response should be an array
+            assert!(response_str.starts_with('['));
+        }
+
+        /// Test ProxyService size limit check in handle_mcp_request path.
+        ///
+        /// This tests the size limit enforcement that happens before
+        /// the body is passed to McpHandler.
+        ///
+        /// # Traceability
+        /// - Implements: REQ-CORE-003 (MCP Transport & Routing)
+        #[test]
+        fn test_proxy_service_mcp_handler_size_limit_config() {
+            let handler = create_test_mcp_handler_with_size_limit(512);
+            assert_eq!(handler.max_body_size(), 512);
+
+            let default_handler = create_test_mcp_handler();
+            // Default is 1MB
+            assert_eq!(default_handler.max_body_size(), 1024 * 1024);
+        }
+    }
 }

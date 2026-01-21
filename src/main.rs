@@ -500,7 +500,8 @@ where
             // Implements: REQ-CORE-002 F-002 (Fail-Closed State)
             let result: Result<_, std::convert::Infallible> = match svc.call(req).await {
                 Ok(response) => {
-                    // UnifiedBody is already a BoxBody<Bytes, ProxyError>, convert to BoxBody<Bytes, hyper::Error>
+                    // UnifiedBody is BoxBody<Bytes, ProxyError>. Convert to BoxBody<Bytes, Box<dyn Error>>
+                    // for hyper compatibility - hyper requires a boxed error type.
                     Ok(response.map(|body| {
                         body.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                             Box::new(std::io::Error::other(e.to_string()))
