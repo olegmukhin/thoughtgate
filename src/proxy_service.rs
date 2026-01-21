@@ -247,13 +247,8 @@ impl ProxyService {
                     return Response::builder()
                         .status(StatusCode::PAYLOAD_TOO_LARGE)
                         .header(header::CONTENT_TYPE, "application/json")
-                        // Full<Bytes> has Infallible error type - this closure is never called
-                        .body(
-                            body.map_err(
-                                |infallible: std::convert::Infallible| match infallible {},
-                            )
-                            .boxed(),
-                        )
+                        // Full<Bytes> has Infallible error - convert using absurd pattern
+                        .body(body.map_err(|e| match e {}).boxed())
                         .map_err(|e| ProxyError::Connection(e.to_string()));
                 }
                 bytes
@@ -274,15 +269,11 @@ impl ProxyService {
         let (status, response_bytes) = mcp_handler.handle(body_bytes).await;
 
         // Build unified response directly from bytes
-        // Full<Bytes> has Infallible error type - this closure is never called
+        // Full<Bytes> has Infallible error - convert using absurd pattern
         Response::builder()
             .status(status)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(
-                Full::new(response_bytes)
-                    .map_err(|infallible: std::convert::Infallible| match infallible {})
-                    .boxed(),
-            )
+            .body(Full::new(response_bytes).map_err(|e| match e {}).boxed())
             .map_err(|e| ProxyError::Connection(e.to_string()))
     }
 

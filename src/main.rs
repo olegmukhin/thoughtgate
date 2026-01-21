@@ -511,11 +511,9 @@ where
                 Err(e) => {
                     error!(error = %e, "Service error");
                     // Use to_response() to map error to proper HTTP status code
-                    // Map Infallible error type to hyper::Error to match Incoming body
-                    Ok(e.to_response().map(|body| {
-                        body.map_err(|never: std::convert::Infallible| match never {})
-                            .boxed()
-                    }))
+                    // Full<Bytes> has Infallible error - convert using absurd pattern
+                    Ok(e.to_response()
+                        .map(|body| body.map_err(|e| match e {}).boxed()))
                 }
             };
             result
