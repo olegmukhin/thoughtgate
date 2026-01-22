@@ -20,19 +20,28 @@ jobs:
   fuzz:
     name: Fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
-    
+
     strategy:
       fail-fast: false
       matrix:
         target:
-          - peeking_fuzz
+          # Core HTTP/Request handling
           - fuzz_uri_parsing
           - fuzz_header_redaction
           - fuzz_full_request
-          - fuzz_amber_path       # REQ-CORE-002
-          - fuzz_green_path       # REQ-CORE-001
-          - fuzz_inspector_chain  # REQ-CORE-002 F-004
-    
+          # REQ-CORE-001: Green Path streaming
+          - fuzz_green_path
+          # REQ-CORE-002: Inspector chain semantics
+          - fuzz_inspector_chain
+          # REQ-CORE-003: JSON-RPC 2.0 parsing (Critical)
+          - fuzz_jsonrpc
+          # REQ-POL-001: Cedar policy evaluation (Critical)
+          - fuzz_cedar_policy
+          # REQ-GOV-001: Task lifecycle state machine
+          - fuzz_task_lifecycle
+          # REQ-CFG-001: Configuration parsing
+          - fuzz_config
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -68,7 +77,7 @@ jobs:
         run: |
           echo "🔍 Fuzzing ${{ matrix.target }} in ${{ steps.duration.outputs.mode }} mode"
           echo "⏱️  Duration: ${{ steps.duration.outputs.seconds }}s"
-          
+
           cargo +nightly fuzz run ${{ matrix.target }} \
             -- \
             -max_total_time=${{ steps.duration.outputs.seconds }} \
@@ -100,4 +109,3 @@ jobs:
           echo "📦 Crash inputs uploaded as artifacts"
           echo "🔬 Reproduce with: cargo +nightly fuzz run ${{ matrix.target }} <crash-file>"
           exit 1
-
