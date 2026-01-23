@@ -242,6 +242,34 @@ impl JsonRpcResponse {
             error: Some(error),
         }
     }
+
+    /// Create a task-created response for SEP-1686 async workflows.
+    ///
+    /// Implements: REQ-GOV-002/F-002 (Task Response)
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The request ID to echo back
+    /// * `task_id` - The created task ID
+    /// * `status` - Initial task status
+    /// * `poll_interval` - Recommended poll interval
+    pub fn task_created(
+        id: Option<JsonRpcId>,
+        task_id: String,
+        status: String,
+        poll_interval: std::time::Duration,
+    ) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id,
+            result: Some(serde_json::json!({
+                "task_id": task_id,
+                "status": status,
+                "poll_interval_ms": poll_interval.as_millis(),
+            })),
+            error: None,
+        }
+    }
 }
 
 /// SEP-1686 task metadata extracted from request params.
