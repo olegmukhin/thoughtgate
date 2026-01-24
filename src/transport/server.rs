@@ -47,7 +47,8 @@ use crate::policy::principal::infer_principal;
 use crate::policy::{CedarContext, CedarDecision, CedarRequest, CedarResource, TimeContext};
 use crate::protocol::{TasksCancelRequest, TasksGetRequest, TasksListRequest, TasksResultRequest};
 use crate::transport::jsonrpc::{
-    JsonRpcId, JsonRpcResponse, McpRequest, ParsedRequests, parse_jsonrpc,
+    JsonRpcId, JsonRpcResponse, McpRequest, ParsedRequests, TaskSupport, ToolDefinition,
+    parse_jsonrpc,
 };
 use crate::transport::router::{McpRouter, RouteTarget, TaskMethod};
 use crate::transport::upstream::{UpstreamClient, UpstreamConfig, UpstreamForwarder};
@@ -648,13 +649,25 @@ async fn handle_mcp_body_bytes(state: &McpState, body: Bytes) -> (StatusCode, By
     let _permit = match state.semaphore.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
-            warn!("Max concurrent requests reached, returning 503");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Bytes::from_static(
-                    br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32013,"message":"Service temporarily unavailable"}}"#,
-                ),
+            let correlation_id = uuid::Uuid::new_v4().to_string();
+            warn!(
+                correlation_id = %correlation_id,
+                "Max concurrent requests reached, returning 503"
             );
+            // Build JSON-RPC error response with correlation ID, but return HTTP 503
+            let error = ThoughtGateError::ServiceUnavailable {
+                reason: "Max concurrent requests exceeded".to_string(),
+            };
+            let jsonrpc_error = error.to_jsonrpc_error(&correlation_id);
+            let response = JsonRpcResponse::error(None, jsonrpc_error);
+            let bytes = serde_json::to_vec(&response)
+                .map(Bytes::from)
+                .unwrap_or_else(|_| {
+                    Bytes::from_static(
+                        br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32013,"message":"Service temporarily unavailable"}}"#,
+                    )
+                });
+            return (StatusCode::SERVICE_UNAVAILABLE, bytes);
         }
     };
 
@@ -744,6 +757,156 @@ fn get_source_id(_state: &McpState) -> &'static str {
 }
 
 // ============================================================================
+// List Method Handler (SEP-1686: tools/list interception)
+// ============================================================================
+
+/// Handle list methods (tools/list, resources/list, prompts/list) with response filtering.
+///
+/// Implements: SEP-1686 Section 3.2 (Tool Advertisement)
+///
+/// This function:
+/// 1. Forwards the request to upstream
+/// 2. Parses the tool list from the response
+/// 3. Applies Gate 1: Filters tools by visibility (ExposeConfig)
+/// 4. Applies Gate 2: Annotates taskSupport based on governance rules
+///
+/// # Arguments
+///
+/// * `state` - MCP handler state with config and upstream client
+/// * `request` - The list request (e.g., tools/list)
+///
+/// # Returns
+///
+/// Modified response with filtered tools and taskSupport annotations.
+async fn handle_list_method(
+    state: &McpState,
+    request: McpRequest,
+) -> Result<JsonRpcResponse, ThoughtGateError> {
+    // Forward to upstream to get the raw tool list
+    let response = state.upstream.forward(&request).await?;
+
+    // If error response, return as-is
+    if response.error.is_some() {
+        return Ok(response);
+    }
+
+    // If no config, return response as-is (transparent proxy mode)
+    let config = match &state.config {
+        Some(c) => c,
+        None => return Ok(response),
+    };
+
+    // Only process tools/list responses (resources/list and prompts/list are similar but deferred)
+    if request.method != "tools/list" {
+        return Ok(response);
+    }
+
+    // Extract tools array from response
+    let result = match &response.result {
+        Some(r) => r,
+        None => return Ok(response),
+    };
+
+    let tools_value = match result.get("tools") {
+        Some(v) => v,
+        None => return Ok(response), // No tools array, return as-is
+    };
+
+    // Parse tools into ToolDefinition structs
+    let mut tools: Vec<ToolDefinition> = match serde_json::from_value(tools_value.clone()) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "Failed to parse tools from upstream response, returning as-is"
+            );
+            return Ok(response);
+        }
+    };
+
+    let source_id = get_source_id(state);
+
+    // Gate 1: Filter by visibility (ExposeConfig)
+    if let Some(source) = config.get_source(source_id) {
+        let expose = source.expose();
+        let original_count = tools.len();
+        tools.retain(|tool| expose.is_visible(&tool.name));
+        let filtered_count = original_count - tools.len();
+        if filtered_count > 0 {
+            debug!(
+                source = source_id,
+                filtered = filtered_count,
+                remaining = tools.len(),
+                "Gate 1: Filtered tools by visibility"
+            );
+        }
+    }
+
+    // Gate 2: Annotate taskSupport based on governance rules
+    for tool in &mut tools {
+        let match_result = config.governance.evaluate(&tool.name, source_id);
+        match match_result.action {
+            crate::config::Action::Approve | crate::config::Action::Policy => {
+                // ThoughtGate requires async task mode for approval/policy actions
+                tool.task_support = Some(TaskSupport::Required);
+            }
+            crate::config::Action::Forward | crate::config::Action::Deny => {
+                // Preserve upstream's taskSupport (don't modify)
+                // Note: Deny tools are visible but denied at call-time
+            }
+        }
+    }
+
+    // Rebuild response with filtered/annotated tools
+    let mut new_result = result.clone();
+    if let Some(obj) = new_result.as_object_mut() {
+        obj.insert(
+            "tools".to_string(),
+            serde_json::to_value(&tools).unwrap_or(tools_value.clone()),
+        );
+    }
+
+    Ok(JsonRpcResponse::success(response.id, new_result))
+}
+
+/// Check if a method is a list method that requires response filtering.
+fn is_list_method(method: &str) -> bool {
+    matches!(method, "tools/list" | "resources/list" | "prompts/list")
+}
+
+/// Validate task metadata presence for SEP-1686 compliance.
+///
+/// Implements: SEP-1686 Section 3.3 (TaskRequired/TaskForbidden)
+///
+/// - For `action: approve` or `action: policy`: client MUST send `params.task`
+/// - For `action: forward` or `action: deny`: no validation (upstream handles it)
+fn validate_task_metadata(
+    request: &McpRequest,
+    action: &crate::config::Action,
+    tool_name: &str,
+) -> Result<(), ThoughtGateError> {
+    let has_task_metadata = request.is_task_augmented();
+
+    match action {
+        crate::config::Action::Approve | crate::config::Action::Policy => {
+            // Task-required: client MUST send params.task
+            if !has_task_metadata {
+                return Err(ThoughtGateError::TaskRequired {
+                    tool: tool_name.to_string(),
+                    hint: "Include params.task per tools/list taskSupport annotation".to_string(),
+                });
+            }
+        }
+        crate::config::Action::Forward | crate::config::Action::Deny => {
+            // Forward: upstream handles task metadata
+            // Deny: will be rejected anyway, don't validate task
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
 // Request Handler with 4-Gate Model
 // ============================================================================
 
@@ -781,12 +944,20 @@ async fn handle_single_request_bytes(state: &McpState, request: McpRequest) -> (
         RouteTarget::PolicyEvaluation { request } => {
             // Apply 4-gate model for governable methods when config is present
             // Implements: REQ-CORE-003/F-002 (Method Routing)
-            if state.config.is_some() && method_requires_gates(&request.method) {
-                route_through_gates(state, request).await
+            if state.config.is_some() {
+                if method_requires_gates(&request.method) {
+                    // Governable methods: tools/call, resources/read, etc.
+                    route_through_gates(state, request).await
+                } else if is_list_method(&request.method) {
+                    // List methods: tools/list, resources/list, prompts/list
+                    // Intercept response, apply Gate 1 filter, annotate taskSupport
+                    handle_list_method(state, request).await
+                } else {
+                    // Other methods: forward directly
+                    state.upstream.forward(&request).await
+                }
             } else {
-                // Legacy mode or list methods: direct Cedar evaluation (Gate 3 only)
-                // Note: tools/list, resources/list, prompts/list bypass Gates 1-2
-                // because they require response filtering (v0.3+ enhancement)
+                // Legacy mode (no config): direct Cedar evaluation (Gate 3 only)
                 evaluate_with_cedar(state, request, None).await
             }
         }
@@ -914,10 +1085,12 @@ async fn handle_task_method(
                     details: format!("Invalid tasks/list params: {}", e),
                 })?;
 
-            // TODO(v0.3): Extract principal from request authentication context.
-            // For v0.2, use a hardcoded default principal. When REQ-CFG-001 (YAML config)
-            // is implemented, this should use the authenticated caller identity.
-            let principal = Principal::new("default");
+            // Infer principal from environment (same as other task operations)
+            let policy_principal =
+                infer_principal().map_err(|e| ThoughtGateError::ServiceUnavailable {
+                    reason: format!("Failed to infer principal: {}", e),
+                })?;
+            let principal = Principal::new(&policy_principal.app_name);
 
             let result = state.task_handler.handle_tasks_list(req, &principal);
 
@@ -1114,6 +1287,13 @@ async fn route_through_gates(
         policy_id = ?match_result.policy_id,
         "Gate 2: Governance rule matched"
     );
+
+    // ========================================================================
+    // SEP-1686: Task Metadata Validation
+    // ========================================================================
+    // Validate that client sent params.task for actions that require it
+    // This is checked AFTER Gate 2 because we need to know the action first
+    validate_task_metadata(&request, &match_result.action, &resource_name)?;
 
     // ========================================================================
     // Route by Gate 2 Action
@@ -1419,10 +1599,19 @@ async fn handle_batch_request_bytes(
                     RouteTarget::PolicyEvaluation { request } => {
                         // Apply 4-gate model for governable methods when config is present
                         // Implements: REQ-CORE-003/F-002 (Method Routing)
-                        if state.config.is_some() && method_requires_gates(&request.method) {
-                            route_through_gates(state, request).await
+                        if state.config.is_some() {
+                            if method_requires_gates(&request.method) {
+                                // Governable methods: tools/call, resources/read, etc.
+                                route_through_gates(state, request).await
+                            } else if is_list_method(&request.method) {
+                                // List methods: tools/list, resources/list, prompts/list
+                                handle_list_method(state, request).await
+                            } else {
+                                // Other methods: forward directly
+                                state.upstream.forward(&request).await
+                            }
                         } else {
-                            // Legacy mode or list methods: direct Cedar evaluation (Gate 3 only)
+                            // Legacy mode (no config): direct Cedar evaluation (Gate 3 only)
                             evaluate_with_cedar(state, request, None).await
                         }
                     }

@@ -344,9 +344,11 @@ impl ApprovalPipeline {
             })?;
 
             // Build synthetic request parts for InspectionContext
+            // Use the actual method from the request for proper context
+            let uri = format!("/{}", current.method);
             let fake_req = http::Request::builder()
                 .method("POST")
-                .uri("/tools/call")
+                .uri(&uri)
                 .header("content-type", "application/json")
                 .body(())
                 .map_err(|e| PipelineError::InternalError {

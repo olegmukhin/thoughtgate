@@ -268,6 +268,35 @@ pub enum ThoughtGateError {
     },
 
     // ═══════════════════════════════════════════════════════════
+    // SEP-1686 Protocol Compliance Errors
+    // ═══════════════════════════════════════════════════════════
+    /// Client called a task-required tool without `params.task`.
+    ///
+    /// Implements: SEP-1686 Section 3.3 (-32018)
+    ///
+    /// Tools advertised with `taskSupport: "required"` MUST be called with
+    /// `params.task` metadata. This error is returned when the client omits it.
+    #[error("Task metadata required for tool '{tool}'")]
+    TaskRequired {
+        /// The tool that requires task metadata
+        tool: String,
+        /// Hint for the client on how to fix this
+        hint: String,
+    },
+
+    /// Client sent `params.task` for a tool that forbids it.
+    ///
+    /// Implements: SEP-1686 Section 3.3 (-32019)
+    ///
+    /// Tools advertised with `taskSupport: "none"` MUST NOT receive `params.task`.
+    /// This error is returned when the client includes task metadata.
+    #[error("Task metadata forbidden for tool '{tool}'")]
+    TaskForbidden {
+        /// The tool that forbids task metadata
+        tool: String,
+    },
+
+    // ═══════════════════════════════════════════════════════════
     // Configuration errors (from REQ-CFG-001)
     // ═══════════════════════════════════════════════════════════
     /// Configuration is invalid or cannot be loaded.
@@ -364,6 +393,10 @@ impl ThoughtGateError {
 
             // ThoughtGate custom codes: Configuration (-32016)
             Self::ConfigurationError { .. } => -32016,
+
+            // ThoughtGate custom codes: SEP-1686 Protocol (-32018, -32019)
+            Self::TaskRequired { .. } => -32018,
+            Self::TaskForbidden { .. } => -32019,
         }
     }
 
@@ -396,6 +429,8 @@ impl ThoughtGateError {
             Self::ConfigurationError { .. } => "configuration_error",
             Self::ServiceUnavailable { .. } => "service_unavailable",
             Self::InternalError { .. } => "internal_error",
+            Self::TaskRequired { .. } => "task_required",
+            Self::TaskForbidden { .. } => "task_forbidden",
         }
     }
 
@@ -442,7 +477,9 @@ impl ThoughtGateError {
             | Self::GovernanceRuleDenied { tool, .. }
             | Self::PolicyDenied { tool, .. }
             | Self::ApprovalRejected { tool, .. }
-            | Self::ApprovalTimeout { tool, .. } => Some(tool),
+            | Self::ApprovalTimeout { tool, .. }
+            | Self::TaskRequired { tool, .. }
+            | Self::TaskForbidden { tool, .. } => Some(tool),
             _ => None,
         }
     }
@@ -515,6 +552,10 @@ impl ThoughtGateError {
             Self::InvalidRequest { details } => Some(details.clone()),
             Self::MethodNotFound { method } => Some(format!("Method: {}", method)),
             Self::InvalidParams { details } => Some(details.clone()),
+
+            // SEP-1686 Protocol errors
+            Self::TaskRequired { hint, .. } => Some(hint.clone()),
+            Self::TaskForbidden { .. } => Some("Tool does not support task mode".to_string()),
 
             // Internal error - correlation ID only (log lookup)
             Self::InternalError { .. } => None,
@@ -1117,5 +1158,89 @@ mod tests {
         for err in non_gate_errors {
             assert!(err.gate().is_none());
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SEP-1686 Error Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Tests TaskRequired error code and formatting.
+    ///
+    /// Verifies: SEP-1686 Section 3.3 (TaskRequired error)
+    #[test]
+    fn test_task_required_error() {
+        let err = ThoughtGateError::TaskRequired {
+            tool: "delete_user".to_string(),
+            hint: "Include params.task per tools/list taskSupport annotation".to_string(),
+        };
+
+        // Verify error code
+        assert_eq!(err.to_jsonrpc_code(), -32018);
+
+        // Verify error type name
+        assert_eq!(err.error_type_name(), "task_required");
+
+        // Verify tool extraction
+        assert_eq!(err.tool(), Some("delete_user"));
+
+        // Verify safe_details includes hint
+        assert!(err.safe_details().is_some());
+        assert!(err.safe_details().unwrap().contains("params.task"));
+    }
+
+    /// Tests TaskForbidden error code and formatting.
+    ///
+    /// Verifies: SEP-1686 Section 3.3 (TaskForbidden error)
+    #[test]
+    fn test_task_forbidden_error() {
+        let err = ThoughtGateError::TaskForbidden {
+            tool: "read_file".to_string(),
+        };
+
+        // Verify error code
+        assert_eq!(err.to_jsonrpc_code(), -32019);
+
+        // Verify error type name
+        assert_eq!(err.error_type_name(), "task_forbidden");
+
+        // Verify tool extraction
+        assert_eq!(err.tool(), Some("read_file"));
+
+        // Verify safe_details provides useful message
+        assert!(err.safe_details().is_some());
+        assert!(err.safe_details().unwrap().contains("task mode"));
+    }
+
+    /// Tests TaskRequired error produces valid JSON-RPC error.
+    #[test]
+    fn test_task_required_jsonrpc_error() {
+        let err = ThoughtGateError::TaskRequired {
+            tool: "admin_action".to_string(),
+            hint: "Use async task mode".to_string(),
+        };
+
+        let jsonrpc_err = err.to_jsonrpc_error("test-correlation-id");
+
+        assert_eq!(jsonrpc_err.code, -32018);
+        assert!(jsonrpc_err.message.contains("admin_action"));
+
+        // Verify data field contains structured error info
+        let data = jsonrpc_err.data.expect("should have data");
+        assert_eq!(data.error_type, "task_required");
+        assert!(data.details.is_some());
+        assert_eq!(data.tool, Some("admin_action".to_string()));
+    }
+
+    /// Tests TaskForbidden error produces valid JSON-RPC error.
+    #[test]
+    fn test_task_forbidden_jsonrpc_error() {
+        let err = ThoughtGateError::TaskForbidden {
+            tool: "simple_tool".to_string(),
+        };
+
+        let jsonrpc_err = err.to_jsonrpc_error("test-correlation-id");
+
+        assert_eq!(jsonrpc_err.code, -32019);
+        assert!(jsonrpc_err.message.contains("simple_tool"));
     }
 }

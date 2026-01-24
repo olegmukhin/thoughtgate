@@ -21,6 +21,61 @@ use uuid::Uuid;
 
 use crate::error::ThoughtGateError;
 
+// ============================================================================
+// SEP-1686 Tool Definition Types
+// ============================================================================
+
+/// MCP tool definition as returned by `tools/list`.
+///
+/// Implements: SEP-1686 (Task-based async execution)
+///
+/// This struct represents a tool in the MCP catalog. The `task_support` field
+/// is added by ThoughtGate to indicate whether the tool requires async task mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDefinition {
+    /// The tool name (unique identifier)
+    pub name: String,
+
+    /// Human-readable description of the tool
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// JSON Schema for the tool's input parameters
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<Value>,
+
+    /// SEP-1686: Whether this tool requires task-based async execution
+    ///
+    /// - `None` → preserve upstream value (transparent proxy)
+    /// - `Some(TaskSupport::Required)` → client MUST send `params.task`
+    /// - `Some(TaskSupport::Optional)` → client MAY send `params.task`
+    /// - `Some(TaskSupport::None)` → client MUST NOT send `params.task`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_support: Option<TaskSupport>,
+
+    /// Additional properties from upstream (preserved as-is)
+    #[serde(flatten)]
+    pub extra: Option<Value>,
+}
+
+/// SEP-1686 task support mode for tools.
+///
+/// Implements: SEP-1686 Section 3.2 (Tool Advertisement)
+///
+/// This enum indicates whether a tool supports or requires async task execution.
+/// Clients use this to determine if they need to include `params.task` in requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskSupport {
+    /// Tool does not support task mode; `params.task` MUST NOT be sent
+    None,
+    /// Tool optionally supports task mode; `params.task` MAY be sent
+    Optional,
+    /// Tool requires task mode; `params.task` MUST be sent
+    Required,
+}
+
 /// JSON-RPC 2.0 request ID.
 ///
 /// The spec allows string or integer IDs. We preserve the exact type
@@ -906,5 +961,136 @@ mod tests {
         assert!(serialized.contains("\"id\":null"));
         assert!(serialized.contains("\"error\""));
         assert!(serialized.contains("-32700"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SEP-1686 Tool Definition Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Tests that TaskSupport serializes as camelCase.
+    #[test]
+    fn test_task_support_serialization() {
+        use super::TaskSupport;
+
+        // Test all variants serialize correctly
+        assert_eq!(
+            serde_json::to_string(&TaskSupport::Required).unwrap(),
+            "\"required\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskSupport::Optional).unwrap(),
+            "\"optional\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskSupport::None).unwrap(),
+            "\"none\""
+        );
+    }
+
+    /// Tests that TaskSupport deserializes from lowercase strings.
+    #[test]
+    fn test_task_support_deserialization() {
+        use super::TaskSupport;
+
+        assert_eq!(
+            serde_json::from_str::<TaskSupport>("\"required\"").unwrap(),
+            TaskSupport::Required
+        );
+        assert_eq!(
+            serde_json::from_str::<TaskSupport>("\"optional\"").unwrap(),
+            TaskSupport::Optional
+        );
+        assert_eq!(
+            serde_json::from_str::<TaskSupport>("\"none\"").unwrap(),
+            TaskSupport::None
+        );
+    }
+
+    /// Tests ToolDefinition serialization with taskSupport.
+    #[test]
+    fn test_tool_definition_serialization() {
+        use super::{TaskSupport, ToolDefinition};
+
+        let tool = ToolDefinition {
+            name: "delete_user".to_string(),
+            description: Some("Deletes a user".to_string()),
+            input_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_id": { "type": "string" }
+                }
+            })),
+            task_support: Some(TaskSupport::Required),
+            extra: None,
+        };
+
+        let serialized = serde_json::to_string(&tool).expect("should serialize");
+
+        // Check camelCase field names
+        assert!(serialized.contains("\"name\":\"delete_user\""));
+        assert!(serialized.contains("\"description\":\"Deletes a user\""));
+        assert!(serialized.contains("\"inputSchema\""));
+        assert!(serialized.contains("\"taskSupport\":\"required\""));
+    }
+
+    /// Tests ToolDefinition deserialization from upstream response.
+    #[test]
+    fn test_tool_definition_deserialization() {
+        use super::ToolDefinition;
+
+        let json = r#"{
+            "name": "read_file",
+            "description": "Reads a file",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }
+        }"#;
+
+        let tool: ToolDefinition = serde_json::from_str(json).expect("should parse");
+        assert_eq!(tool.name, "read_file");
+        assert_eq!(tool.description, Some("Reads a file".to_string()));
+        assert!(tool.input_schema.is_some());
+        assert!(tool.task_support.is_none()); // Not set by upstream
+    }
+
+    /// Tests ToolDefinition preserves extra fields from upstream.
+    #[test]
+    fn test_tool_definition_extra_fields() {
+        use super::ToolDefinition;
+
+        let json = r#"{
+            "name": "custom_tool",
+            "description": "A custom tool",
+            "customField": "custom_value",
+            "anotherField": 123
+        }"#;
+
+        let tool: ToolDefinition = serde_json::from_str(json).expect("should parse");
+        assert_eq!(tool.name, "custom_tool");
+
+        // Re-serialize and check extra fields are preserved
+        let reserialized = serde_json::to_string(&tool).expect("should serialize");
+        assert!(reserialized.contains("\"customField\":\"custom_value\""));
+        assert!(reserialized.contains("\"anotherField\":123"));
+    }
+
+    /// Tests ToolDefinition with taskSupport set to none.
+    #[test]
+    fn test_tool_definition_task_support_none() {
+        use super::{TaskSupport, ToolDefinition};
+
+        let tool = ToolDefinition {
+            name: "simple_tool".to_string(),
+            description: None,
+            input_schema: None,
+            task_support: Some(TaskSupport::None),
+            extra: None,
+        };
+
+        let serialized = serde_json::to_string(&tool).expect("should serialize");
+        assert!(serialized.contains("\"taskSupport\":\"none\""));
     }
 }
