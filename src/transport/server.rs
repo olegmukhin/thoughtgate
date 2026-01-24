@@ -45,7 +45,11 @@ use crate::governance::{
 use crate::policy::engine::CedarEngine;
 use crate::policy::principal::infer_principal;
 use crate::policy::{CedarContext, CedarDecision, CedarRequest, CedarResource, TimeContext};
-use crate::protocol::{TasksCancelRequest, TasksGetRequest, TasksListRequest, TasksResultRequest};
+use crate::protocol::{
+    CapabilityCache, TasksCancelRequest, TasksGetRequest, TasksListRequest, TasksResultRequest,
+    extract_upstream_sse_support, extract_upstream_task_support, inject_task_capability,
+    strip_sse_capability,
+};
 use crate::transport::jsonrpc::{
     JsonRpcId, JsonRpcResponse, McpRequest, ParsedRequests, TaskSupport, ToolDefinition,
     ToolExecution, parse_jsonrpc,
@@ -140,6 +144,8 @@ pub struct McpState {
     pub semaphore: Arc<Semaphore>,
     /// Maximum body size in bytes
     pub max_body_size: usize,
+    /// Capability cache for upstream detection (REQ-CORE-007)
+    pub capability_cache: Arc<CapabilityCache>,
 }
 
 /// Configuration for the MCP handler.
@@ -246,6 +252,7 @@ impl McpHandler {
             approval_engine: None,
             semaphore,
             max_body_size: config.max_body_size,
+            capability_cache: Arc::new(CapabilityCache::new()),
         });
 
         Self { state }
@@ -271,6 +278,7 @@ impl McpHandler {
             approval_engine: None,
             semaphore,
             max_body_size: config.max_body_size,
+            capability_cache: Arc::new(CapabilityCache::new()),
         });
 
         Self { state }
@@ -452,6 +460,7 @@ impl McpServer {
             approval_engine,
             semaphore,
             max_body_size: config.max_body_size,
+            capability_cache: Arc::new(CapabilityCache::new()),
         });
 
         Ok(Self {
@@ -489,6 +498,7 @@ impl McpServer {
             approval_engine,
             semaphore,
             max_body_size: config.max_body_size,
+            capability_cache: Arc::new(CapabilityCache::new()),
         });
 
         Ok(Self {
@@ -537,6 +547,7 @@ impl McpServer {
             approval_engine,
             semaphore,
             max_body_size: server_config.max_body_size,
+            capability_cache: Arc::new(CapabilityCache::new()),
         });
 
         Ok(Self {
@@ -757,6 +768,87 @@ fn get_source_id(_state: &McpState) -> &'static str {
 }
 
 // ============================================================================
+// Initialize Method Handler (REQ-CORE-007: Capability Injection)
+// ============================================================================
+
+/// Handle the `initialize` method with capability injection.
+///
+/// Implements: REQ-CORE-007/F-001 (Capability Injection)
+///
+/// This function:
+/// 1. Forwards the `initialize` request to upstream
+/// 2. Extracts and caches upstream capability detection
+/// 3. Injects ThoughtGate's task capability (always)
+/// 4. Conditionally advertises SSE (only if upstream supports it)
+///
+/// # Arguments
+///
+/// * `state` - MCP handler state with capability cache and upstream client
+/// * `request` - The initialize request
+///
+/// # Returns
+///
+/// Modified initialize response with injected capabilities.
+async fn handle_initialize_method(
+    state: &McpState,
+    request: McpRequest,
+) -> Result<JsonRpcResponse, ThoughtGateError> {
+    // Forward to upstream to get the raw initialize response
+    let response = state.upstream.forward(&request).await?;
+
+    // If error response, return as-is (don't inject capabilities on error)
+    if response.error.is_some() {
+        return Ok(response);
+    }
+
+    // Extract result, return as-is if missing
+    let result = match &response.result {
+        Some(r) => r.clone(),
+        None => return Ok(response),
+    };
+
+    // Extract and cache upstream capabilities
+    let upstream_tasks = extract_upstream_task_support(&result);
+    let upstream_sse = extract_upstream_sse_support(&result);
+
+    state
+        .capability_cache
+        .set_upstream_supports_tasks(upstream_tasks);
+    state
+        .capability_cache
+        .set_upstream_supports_task_sse(upstream_sse);
+
+    info!(
+        upstream_tasks = upstream_tasks,
+        upstream_sse = upstream_sse,
+        "Detected upstream capabilities"
+    );
+
+    // Inject ThoughtGate's capabilities
+    let mut new_result = result;
+
+    // Always inject task capability (ThoughtGate supports tasks)
+    inject_task_capability(&mut new_result);
+
+    // v0.2: Strip SSE capability entirely
+    // ThoughtGate does not yet implement SSE endpoints, so we must not
+    // advertise the capability - even if upstream supports it. Clients would
+    // attempt to subscribe and fail. Detection is preserved in CapabilityCache
+    // for future use in v0.3+.
+    // See: REQ-GOV-004 (Upstream Task Orchestration) - DEFERRED to v0.3+
+    strip_sse_capability(&mut new_result);
+
+    debug!(
+        injected_tasks = true,
+        upstream_sse_detected = upstream_sse,
+        sse_stripped = true,
+        "Injected capabilities into initialize response (SSE stripped for v0.2)"
+    );
+
+    Ok(JsonRpcResponse::success(response.id, new_result))
+}
+
+// ============================================================================
 // List Method Handler (SEP-1686: tools/list interception)
 // ============================================================================
 
@@ -973,6 +1065,14 @@ async fn handle_single_request_bytes(state: &McpState, request: McpRequest) -> (
                 "Handling task method"
             );
             handle_task_method(state, method, &request).await
+        }
+        RouteTarget::InitializeHandler { request } => {
+            // Implements: REQ-CORE-007/F-001 (Capability Injection)
+            debug!(
+                correlation_id = %correlation_id,
+                "Handling initialize method for capability injection"
+            );
+            handle_initialize_method(state, request).await
         }
         RouteTarget::PassThrough { request } => state.upstream.forward(&request).await,
     };
@@ -1622,6 +1722,10 @@ async fn handle_batch_request_bytes(
                     RouteTarget::TaskHandler { method, request } => {
                         handle_task_method(state, method, &request).await
                     }
+                    RouteTarget::InitializeHandler { request } => {
+                        // Implements: REQ-CORE-007/F-001 (Capability Injection)
+                        handle_initialize_method(state, request).await
+                    }
                     RouteTarget::PassThrough { request } => state.upstream.forward(&request).await,
                 };
 
@@ -1756,6 +1860,7 @@ mod tests {
             approval_engine: None,
             semaphore: Arc::new(Semaphore::new(100)),
             max_body_size: 1024 * 1024,
+            capability_cache: Arc::new(CapabilityCache::new()),
         })
     }
 
@@ -1926,6 +2031,7 @@ mod tests {
             approval_engine: None,
             semaphore: Arc::new(Semaphore::new(0)), // No permits available
             max_body_size: 1024 * 1024,
+            capability_cache: Arc::new(CapabilityCache::new()),
         });
 
         let router = Router::new()
@@ -1964,6 +2070,7 @@ mod tests {
             approval_engine: None,
             semaphore: Arc::new(Semaphore::new(100)),
             max_body_size: 10, // Very small limit
+            capability_cache: Arc::new(CapabilityCache::new()),
         });
 
         // Router with DefaultBodyLimit disabled - we check size manually and return JSON-RPC error
@@ -2099,7 +2206,13 @@ mod tests {
 
     /// Verifies: REQ-GOV-001/F-005 (tasks/list routing)
     #[tokio::test]
+    #[serial]
     async fn test_tasks_list_routing() {
+        // Set dev mode to allow principal inference without K8s identity
+        unsafe {
+            std::env::set_var("THOUGHTGATE_DEV_MODE", "true");
+        }
+
         let state = create_test_state();
         let router = Router::new()
             .route("/mcp/v1", post(handle_mcp_request))
@@ -2128,6 +2241,10 @@ mod tests {
             result["tasks"].as_array().unwrap().is_empty(),
             "Tasks should be empty"
         );
+
+        unsafe {
+            std::env::remove_var("THOUGHTGATE_DEV_MODE");
+        }
     }
 
     /// Verifies: REQ-GOV-001/F-003 (tasks/get routing - task not found)
@@ -2287,6 +2404,7 @@ mod tests {
             approval_engine: None,
             semaphore: Arc::new(Semaphore::new(100)),
             max_body_size: 1024 * 1024,
+            capability_cache: Arc::new(CapabilityCache::new()),
         })
     }
 
@@ -2431,5 +2549,294 @@ mod tests {
             std::env::remove_var("THOUGHTGATE_DEV_MODE");
             std::env::remove_var("THOUGHTGATE_POLICIES");
         }
+    }
+
+    // ========================================================================
+    // Initialize Capability Injection Tests (REQ-CORE-007)
+    // ========================================================================
+
+    /// Mock upstream that returns a specific initialize response.
+    struct MockInitializeUpstream {
+        /// The response to return for initialize requests.
+        response: serde_json::Value,
+    }
+
+    impl MockInitializeUpstream {
+        fn with_capabilities(tasks: bool, sse: bool) -> Self {
+            let mut capabilities = serde_json::Map::new();
+
+            if tasks {
+                capabilities.insert(
+                    "tasks".to_string(),
+                    serde_json::json!({
+                        "requests": {
+                            "tools/call": true
+                        }
+                    }),
+                );
+            }
+
+            if sse {
+                capabilities.insert(
+                    "notifications".to_string(),
+                    serde_json::json!({
+                        "tasks": {
+                            "status": true
+                        }
+                    }),
+                );
+            }
+
+            let response = serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {
+                    "name": "mock-upstream",
+                    "version": "1.0.0"
+                },
+                "capabilities": capabilities
+            });
+
+            Self { response }
+        }
+
+        fn without_capabilities() -> Self {
+            Self {
+                response: serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {
+                        "name": "mock-upstream",
+                        "version": "1.0.0"
+                    },
+                    "capabilities": {}
+                }),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UpstreamForwarder for MockInitializeUpstream {
+        async fn forward(&self, request: &McpRequest) -> Result<JsonRpcResponse, ThoughtGateError> {
+            if request.method == "initialize" {
+                Ok(JsonRpcResponse::success(
+                    request.id.clone(),
+                    self.response.clone(),
+                ))
+            } else {
+                Ok(JsonRpcResponse::success(
+                    request.id.clone(),
+                    serde_json::json!({"mock": "response"}),
+                ))
+            }
+        }
+
+        async fn forward_batch(
+            &self,
+            requests: &[McpRequest],
+        ) -> Result<Vec<JsonRpcResponse>, ThoughtGateError> {
+            let mut responses = Vec::new();
+            for request in requests {
+                if !request.is_notification() {
+                    responses.push(self.forward(request).await?);
+                }
+            }
+            Ok(responses)
+        }
+    }
+
+    fn create_test_state_with_upstream(upstream: Arc<dyn UpstreamForwarder>) -> Arc<McpState> {
+        let task_store = Arc::new(TaskStore::with_defaults());
+        let task_handler = TaskHandler::new(task_store);
+        let cedar_engine = Arc::new(CedarEngine::new().expect("Failed to create Cedar engine"));
+
+        Arc::new(McpState {
+            upstream,
+            router: McpRouter::new(),
+            task_handler,
+            cedar_engine,
+            config: None,
+            approval_engine: None,
+            semaphore: Arc::new(Semaphore::new(100)),
+            max_body_size: 1024 * 1024,
+            capability_cache: Arc::new(CapabilityCache::new()),
+        })
+    }
+
+    /// Verifies: REQ-CORE-007/F-001.1 (ThoughtGate injects task capability)
+    #[tokio::test]
+    async fn test_initialize_injects_task_capability() {
+        // Upstream without task support
+        let upstream = Arc::new(MockInitializeUpstream::without_capabilities());
+        let state = create_test_state_with_upstream(upstream);
+
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state.clone());
+
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test"}}}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        // Should have injected task capability
+        let result = &parsed["result"];
+        assert_eq!(
+            result["capabilities"]["tasks"]["requests"]["tools/call"], true,
+            "ThoughtGate should inject task capability"
+        );
+
+        // SSE should NOT be present (upstream doesn't support it)
+        assert!(
+            result["capabilities"]["notifications"]["tasks"]["status"].is_null(),
+            "SSE should not be advertised when upstream doesn't support it"
+        );
+
+        // Cache should reflect upstream capabilities (no tasks)
+        assert!(
+            !state.capability_cache.upstream_supports_tasks(),
+            "Cache should show upstream does NOT support tasks"
+        );
+    }
+
+    /// Verifies: REQ-CORE-007/F-001.2, F-001.3 (Upstream capability detection and caching)
+    #[tokio::test]
+    async fn test_initialize_detects_upstream_capabilities() {
+        // Upstream WITH task and SSE support
+        let upstream = Arc::new(MockInitializeUpstream::with_capabilities(true, true));
+        let state = create_test_state_with_upstream(upstream);
+
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state.clone());
+
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test"}}}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        // Should have task capability (both from upstream and ThoughtGate)
+        let result = &parsed["result"];
+        assert_eq!(
+            result["capabilities"]["tasks"]["requests"]["tools/call"], true,
+            "Task capability should be present"
+        );
+
+        // SSE should NOT be advertised (disabled for v0.2, even if upstream supports it)
+        assert!(
+            result["capabilities"]["notifications"]["tasks"]["status"].is_null(),
+            "SSE should NOT be advertised in v0.2 (disabled until SSE endpoint implemented)"
+        );
+
+        // Cache should still reflect upstream capabilities (detection works, just not advertised)
+        assert!(
+            state.capability_cache.upstream_supports_tasks(),
+            "Cache should show upstream supports tasks"
+        );
+        assert!(
+            state.capability_cache.upstream_supports_task_sse(),
+            "Cache should show upstream supports SSE (detected but not advertised)"
+        );
+    }
+
+    /// Verifies: SSE detection works but is not advertised (v0.2)
+    #[tokio::test]
+    async fn test_initialize_sse_detection_without_advertisement() {
+        // Upstream with tasks but NO SSE - verify detection still works
+        let upstream = Arc::new(MockInitializeUpstream::with_capabilities(true, false));
+        let state = create_test_state_with_upstream(upstream);
+
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state.clone());
+
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test"}}}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        let result = &parsed["result"];
+
+        // Task capability should be present
+        assert_eq!(
+            result["capabilities"]["tasks"]["requests"]["tools/call"], true,
+            "Task capability should be present"
+        );
+
+        // SSE should NOT be present (disabled for v0.2)
+        assert!(
+            result["capabilities"]["notifications"]["tasks"]["status"].is_null(),
+            "SSE should NOT be advertised in v0.2"
+        );
+
+        // Cache should reflect upstream capabilities (detection works)
+        assert!(
+            state.capability_cache.upstream_supports_tasks(),
+            "Cache should show upstream supports tasks"
+        );
+        assert!(
+            !state.capability_cache.upstream_supports_task_sse(),
+            "Cache should show upstream does NOT support SSE"
+        );
+    }
+
+    /// Verifies: REQ-CORE-007 (Original fields preserved)
+    #[tokio::test]
+    async fn test_initialize_preserves_original_fields() {
+        // Upstream without capabilities
+        let upstream = Arc::new(MockInitializeUpstream::without_capabilities());
+        let state = create_test_state_with_upstream(upstream);
+
+        let router = Router::new()
+            .route("/mcp/v1", post(handle_mcp_request))
+            .with_state(state);
+
+        let body = r#"{"jsonrpc":"2.0","id":"init-123","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test"}}}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp/v1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .expect("should build request");
+
+        let response = router.oneshot(request).await.expect("should get response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_body(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("should parse response");
+
+        // Original fields should be preserved
+        let result = &parsed["result"];
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["serverInfo"]["name"], "mock-upstream");
+        assert_eq!(result["serverInfo"]["version"], "1.0.0");
+
+        // ID should be preserved
+        assert_eq!(parsed["id"], "init-123");
     }
 }
