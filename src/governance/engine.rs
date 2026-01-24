@@ -128,7 +128,8 @@ impl ApprovalEngineConfig {
 /// Action to take when approval times out.
 ///
 /// Implements: REQ-GOV-002/F-006.4
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TimeoutAction {
     /// Deny the request on timeout (return -32008)
     #[default]
@@ -231,6 +232,9 @@ pub struct ApprovalEngine {
     pipeline: Arc<ApprovalPipeline>,
     /// Engine configuration
     config: ApprovalEngineConfig,
+    /// Tracks tasks currently being executed to prevent concurrent execution
+    /// This ensures at-most-once semantics for upstream calls
+    executing: dashmap::DashSet<TaskId>,
 }
 
 impl ApprovalEngine {
@@ -301,7 +305,24 @@ impl ApprovalEngine {
             scheduler,
             pipeline,
             config,
+            executing: dashmap::DashSet::new(),
         })
+    }
+
+    /// Spawn background tasks for the approval engine.
+    ///
+    /// Implements: REQ-GOV-003/F-002 (Background Polling), REQ-GOV-001/F-008 (TTL Enforcement)
+    ///
+    /// This must be called after creating the engine to start:
+    /// - The polling scheduler loop that checks for approval decisions
+    /// - Periodic expiration sweeps for overdue tasks
+    ///
+    /// The tasks will run until the shutdown token is cancelled.
+    pub fn spawn_background_tasks(&self) {
+        let scheduler = self.scheduler.clone();
+        tokio::spawn(async move {
+            scheduler.run().await;
+        });
     }
 
     /// Start an approval workflow.
@@ -360,6 +381,7 @@ impl ApprovalEngine {
                 pre_result.transformed_request,
                 principal.clone(),
                 Some(timeout),
+                self.config.on_timeout,
             )
             .map_err(|e| ApprovalEngineError::TaskCreation {
                 details: e.to_string(),
@@ -442,9 +464,9 @@ impl ApprovalEngine {
         // Check task status
         match task.status {
             TaskStatus::InputRequired => {
-                // Still waiting for approval
-                return Err(ThoughtGateError::ServiceUnavailable {
-                    reason: "Task is still waiting for approval".to_string(),
+                // Still waiting for approval - return TaskResultNotReady per SEP-1686
+                return Err(ThoughtGateError::TaskResultNotReady {
+                    task_id: task_id.to_string(),
                 });
             }
             TaskStatus::Executing => {
@@ -459,12 +481,13 @@ impl ApprovalEngine {
                 });
             }
             TaskStatus::Expired => {
-                // Handle timeout based on config
-                match self.config.on_timeout {
+                // Handle timeout based on task's captured on_timeout (not current config)
+                // This ensures "complete with state at decision time" semantics
+                match task.on_timeout {
                     TimeoutAction::Deny => {
                         return Err(ThoughtGateError::ApprovalTimeout {
                             tool: task.original_request.name.clone(),
-                            timeout_secs: self.config.approval_timeout.as_secs(),
+                            timeout_secs: task.ttl.as_secs(),
                             workflow: None, // v0.2: workflow not tracked
                         });
                     }
@@ -472,6 +495,14 @@ impl ApprovalEngine {
                         // Auto-approve: create synthetic approval and execute directly
                         // Note: Expired is terminal, so we can't transition. Instead,
                         // we create a synthetic approval record and execute the pipeline.
+
+                        // Prevent concurrent execution - ensures at-most-once semantics
+                        if !self.executing.insert(task_id.clone()) {
+                            return Err(ThoughtGateError::ServiceUnavailable {
+                                reason: "Task execution already in progress".to_string(),
+                            });
+                        }
+
                         warn!(
                             task_id = %task_id,
                             "Auto-approving timed-out task (on_timeout: approve)"
@@ -497,6 +528,9 @@ impl ApprovalEngine {
                             .pipeline
                             .execute_approved(&task, &synthetic_approval)
                             .await;
+
+                        // Remove from executing set now that pipeline is complete
+                        self.executing.remove(task_id);
 
                         return match pipeline_result {
                             PipelineResult::Success { result } => {
@@ -543,9 +577,9 @@ impl ApprovalEngine {
                 });
             }
             TaskStatus::Working => {
-                // Still in pre-approval phase
-                return Err(ThoughtGateError::ServiceUnavailable {
-                    reason: "Task is still being processed".to_string(),
+                // Still in pre-approval phase - return TaskResultNotReady per SEP-1686
+                return Err(ThoughtGateError::TaskResultNotReady {
+                    task_id: task_id.to_string(),
                 });
             }
         }
@@ -553,15 +587,27 @@ impl ApprovalEngine {
         // At this point, task is in Executing state (approval was recorded)
         // The task was already transitioned to Executing by record_approval()
 
+        // Prevent concurrent execution - ensures at-most-once semantics
+        // If another call is already executing this task, return "in progress" error
+        if !self.executing.insert(task_id.clone()) {
+            return Err(ThoughtGateError::ServiceUnavailable {
+                reason: "Task execution already in progress".to_string(),
+            });
+        }
+
         // Execute the full pipeline (with approval record)
-        let approval =
-            task.approval
-                .as_ref()
-                .ok_or_else(|| ThoughtGateError::ServiceUnavailable {
-                    reason: "Task approved but no approval record".to_string(),
-                })?;
+        // Use a guard to ensure we clean up the executing set on all exit paths
+        let approval = task.approval.as_ref().ok_or_else(|| {
+            self.executing.remove(task_id);
+            ThoughtGateError::ServiceUnavailable {
+                reason: "Task approved but no approval record".to_string(),
+            }
+        })?;
 
         let pipeline_result = self.pipeline.execute_approved(&task, approval).await;
+
+        // Remove from executing set now that pipeline is complete
+        self.executing.remove(task_id);
 
         // Handle pipeline result
         match pipeline_result {
@@ -906,10 +952,11 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            ThoughtGateError::ServiceUnavailable { reason } => {
-                assert!(reason.contains("waiting for approval"));
+            ThoughtGateError::TaskResultNotReady { task_id } => {
+                // Per SEP-1686: pending tasks return TaskResultNotReady
+                assert_eq!(task_id, start_result.task_id.to_string());
             }
-            other => panic!("Expected ServiceUnavailable, got {:?}", other),
+            other => panic!("Expected TaskResultNotReady, got {:?}", other),
         }
     }
 

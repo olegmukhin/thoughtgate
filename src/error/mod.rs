@@ -366,8 +366,9 @@ impl ThoughtGateError {
             // ThoughtGate custom codes: Gate 3 - Cedar Policy (-32003)
             Self::PolicyDenied { .. } => -32003,
 
-            // ThoughtGate custom codes: Task errors (-32004 to -32006, -32020)
-            Self::TaskNotFound { .. } => -32004,
+            // ThoughtGate custom codes: Task errors (-32005, -32006, -32020)
+            // Note: TaskNotFound uses -32602 (Invalid params) per MCP Tasks spec
+            Self::TaskNotFound { .. } => -32602,
             Self::TaskExpired { .. } => -32005,
             Self::TaskCancelled { .. } => -32006,
             Self::TaskResultNotReady { .. } => -32020,
@@ -672,7 +673,7 @@ mod tests {
                 task_id: "test".to_string()
             }
             .to_jsonrpc_code(),
-            -32004
+            -32602 // MCP: Invalid params (taskId not found)
         );
         assert_eq!(
             ThoughtGateError::TaskExpired {

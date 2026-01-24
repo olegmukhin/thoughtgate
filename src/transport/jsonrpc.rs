@@ -97,6 +97,60 @@ pub enum TaskSupport {
     Required,
 }
 
+/// MCP resource definition as returned by `resources/list`.
+///
+/// Implements: MCP Protocol - Resource Listing
+///
+/// Resources represent data that can be read by agents. The URI serves
+/// as both identifier and access path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceDefinition {
+    /// The resource URI (unique identifier and access path)
+    pub uri: String,
+
+    /// Human-readable name of the resource
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Human-readable description of the resource
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// MIME type of the resource content
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+
+    /// Additional properties from upstream (preserved as-is)
+    #[serde(flatten)]
+    pub extra: Option<Value>,
+}
+
+/// MCP prompt definition as returned by `prompts/list`.
+///
+/// Implements: MCP Protocol - Prompt Listing
+///
+/// Prompts are templates that can be used to generate messages.
+/// They may accept arguments that customize their output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptDefinition {
+    /// The prompt name (unique identifier)
+    pub name: String,
+
+    /// Human-readable description of the prompt
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Arguments the prompt accepts
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<Value>>,
+
+    /// Additional properties from upstream (preserved as-is)
+    #[serde(flatten)]
+    pub extra: Option<Value>,
+}
+
 /// JSON-RPC 2.0 request ID.
 ///
 /// The spec allows string or integer IDs. We preserve the exact type

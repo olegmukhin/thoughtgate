@@ -162,14 +162,13 @@ The system must additionally:
 | TTL cleanup background task | ✅ In Scope | Periodic expired task removal |
 | `tasks/get` | ✅ In Scope | Status retrieval |
 | `tasks/result` | ✅ In Scope | Result retrieval |
-| `tasks/list` | ✅ In Scope | Simple (no pagination) |
+| `tasks/list` | ✅ In Scope | MCP-compliant cursor pagination |
 | `tasks/cancel` | ✅ In Scope | Cancellation |
 | Capability advertisement | ✅ In Scope | During initialize (REQ-CORE-007) |
 | Tool annotation rewriting | ✅ In Scope | During tools/list (REQ-CORE-007) |
 | Task metadata validation | ✅ In Scope | On tools/call (REQ-CORE-007) |
 | Metrics and logging | ✅ In Scope | Observability |
 | Rate limiting | ❌ Deferred | v0.3+ (nice-to-have) |
-| `tasks/list` pagination | ❌ Deferred | v0.3+ (return all initially) |
 | SSE notifications | ❌ Deferred | v0.3+ (polling works for v0.2) |
 | Blocking mode | ❌ Removed | Replaced by SEP-1686 async |
 | Client disconnection detection | ❌ Removed | Less critical with async polling |
@@ -609,7 +608,6 @@ These features are implemented in v0.2:
 
 **Deferred to v0.3+:**
 - **F-012:** Rate limiting and capacity management
-- `tasks/list` pagination
 
 See §10 for state machine reference.
 

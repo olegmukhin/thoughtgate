@@ -51,8 +51,8 @@ use crate::protocol::{
     strip_sse_capability,
 };
 use crate::transport::jsonrpc::{
-    JsonRpcId, JsonRpcResponse, McpRequest, ParsedRequests, TaskSupport, ToolDefinition,
-    ToolExecution, parse_jsonrpc,
+    JsonRpcId, JsonRpcResponse, McpRequest, ParsedRequests, PromptDefinition, ResourceDefinition,
+    TaskSupport, ToolDefinition, ToolExecution, parse_jsonrpc,
 };
 use crate::transport::router::{McpRouter, RouteTarget, TaskMethod};
 use crate::transport::upstream::{UpstreamClient, UpstreamConfig, UpstreamForwarder};
@@ -420,6 +420,11 @@ fn create_governance_components(
             .map_err(|e| ThoughtGateError::ServiceUnavailable {
                 reason: format!("Failed to create ApprovalEngine: {}", e),
             })?;
+
+        // Spawn background polling loop for approval decisions
+        // Implements: REQ-GOV-003/F-002, REQ-GOV-001/F-008
+        engine.spawn_background_tasks();
+        info!("ApprovalEngine background tasks started");
 
         Some(Arc::new(engine))
     } else {
@@ -888,81 +893,180 @@ async fn handle_list_method(
         None => return Ok(response),
     };
 
-    // Only process tools/list responses (resources/list and prompts/list are similar but deferred)
-    if request.method != "tools/list" {
-        return Ok(response);
-    }
-
-    // Extract tools array from response
+    // Extract result object from response
     let result = match &response.result {
         Some(r) => r,
         None => return Ok(response),
     };
 
-    let tools_value = match result.get("tools") {
-        Some(v) => v,
-        None => return Ok(response), // No tools array, return as-is
-    };
-
-    // Parse tools into ToolDefinition structs
-    let mut tools: Vec<ToolDefinition> = match serde_json::from_value(tools_value.clone()) {
-        Ok(t) => t,
-        Err(e) => {
-            warn!(
-                error = %e,
-                "Failed to parse tools from upstream response, returning as-is"
-            );
-            return Ok(response);
-        }
-    };
-
     let source_id = get_source_id(state);
 
-    // Gate 1: Filter by visibility (ExposeConfig)
-    if let Some(source) = config.get_source(source_id) {
-        let expose = source.expose();
-        let original_count = tools.len();
-        tools.retain(|tool| expose.is_visible(&tool.name));
-        let filtered_count = original_count - tools.len();
-        if filtered_count > 0 {
-            debug!(
-                source = source_id,
-                filtered = filtered_count,
-                remaining = tools.len(),
-                "Gate 1: Filtered tools by visibility"
-            );
+    // Gate 1: Filter by visibility (ExposeConfig) for all list methods
+    // Per REQ-CORE-003/F-003: Gate 1 applies to tools, resources, and prompts
+    match request.method.as_str() {
+        "tools/list" => {
+            let tools_value = match result.get("tools") {
+                Some(v) => v,
+                None => return Ok(response),
+            };
+
+            // Parse tools into ToolDefinition structs
+            let mut tools: Vec<ToolDefinition> = match serde_json::from_value(tools_value.clone()) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "Failed to parse tools from upstream response, returning as-is"
+                    );
+                    return Ok(response);
+                }
+            };
+
+            // Gate 1: Filter by visibility (ExposeConfig)
+            if let Some(source) = config.get_source(source_id) {
+                let expose = source.expose();
+                let original_count = tools.len();
+                tools.retain(|tool| expose.is_visible(&tool.name));
+                let filtered_count = original_count - tools.len();
+                if filtered_count > 0 {
+                    debug!(
+                        source = source_id,
+                        filtered = filtered_count,
+                        remaining = tools.len(),
+                        "Gate 1: Filtered tools by visibility"
+                    );
+                }
+            }
+
+            // Gate 2: Annotate execution.taskSupport based on governance rules
+            // Per MCP Tasks Specification (Protocol Revision 2025-11-25)
+            for tool in &mut tools {
+                let match_result = config.governance.evaluate(&tool.name, source_id);
+                match match_result.action {
+                    crate::config::Action::Approve | crate::config::Action::Policy => {
+                        // ThoughtGate requires async task mode for approval/policy actions
+                        // Set execution.taskSupport = "required" per MCP spec
+                        tool.execution = Some(ToolExecution {
+                            task_support: Some(TaskSupport::Required),
+                        });
+                    }
+                    crate::config::Action::Forward | crate::config::Action::Deny => {
+                        // Preserve upstream's execution.taskSupport (don't modify)
+                        // Note: Deny tools are visible but denied at call-time
+                    }
+                }
+            }
+
+            // Rebuild response with filtered/annotated tools
+            let mut new_result = result.clone();
+            if let Some(obj) = new_result.as_object_mut() {
+                obj.insert(
+                    "tools".to_string(),
+                    serde_json::to_value(&tools).unwrap_or(tools_value.clone()),
+                );
+            }
+
+            Ok(JsonRpcResponse::success(response.id, new_result))
+        }
+        "resources/list" => {
+            let resources_value = match result.get("resources") {
+                Some(v) => v,
+                None => return Ok(response),
+            };
+
+            // Parse resources into ResourceDefinition structs
+            let mut resources: Vec<ResourceDefinition> =
+                match serde_json::from_value(resources_value.clone()) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "Failed to parse resources from upstream response, returning as-is"
+                        );
+                        return Ok(response);
+                    }
+                };
+
+            // Gate 1: Filter by visibility (ExposeConfig)
+            // Resources are filtered by URI pattern
+            if let Some(source) = config.get_source(source_id) {
+                let expose = source.expose();
+                let original_count = resources.len();
+                resources.retain(|resource| expose.is_visible(&resource.uri));
+                let filtered_count = original_count - resources.len();
+                if filtered_count > 0 {
+                    debug!(
+                        source = source_id,
+                        filtered = filtered_count,
+                        remaining = resources.len(),
+                        "Gate 1: Filtered resources by visibility"
+                    );
+                }
+            }
+
+            // Rebuild response with filtered resources
+            let mut new_result = result.clone();
+            if let Some(obj) = new_result.as_object_mut() {
+                obj.insert(
+                    "resources".to_string(),
+                    serde_json::to_value(&resources).unwrap_or(resources_value.clone()),
+                );
+            }
+
+            Ok(JsonRpcResponse::success(response.id, new_result))
+        }
+        "prompts/list" => {
+            let prompts_value = match result.get("prompts") {
+                Some(v) => v,
+                None => return Ok(response),
+            };
+
+            // Parse prompts into PromptDefinition structs
+            let mut prompts: Vec<PromptDefinition> =
+                match serde_json::from_value(prompts_value.clone()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "Failed to parse prompts from upstream response, returning as-is"
+                        );
+                        return Ok(response);
+                    }
+                };
+
+            // Gate 1: Filter by visibility (ExposeConfig)
+            // Prompts are filtered by name pattern
+            if let Some(source) = config.get_source(source_id) {
+                let expose = source.expose();
+                let original_count = prompts.len();
+                prompts.retain(|prompt| expose.is_visible(&prompt.name));
+                let filtered_count = original_count - prompts.len();
+                if filtered_count > 0 {
+                    debug!(
+                        source = source_id,
+                        filtered = filtered_count,
+                        remaining = prompts.len(),
+                        "Gate 1: Filtered prompts by visibility"
+                    );
+                }
+            }
+
+            // Rebuild response with filtered prompts
+            let mut new_result = result.clone();
+            if let Some(obj) = new_result.as_object_mut() {
+                obj.insert(
+                    "prompts".to_string(),
+                    serde_json::to_value(&prompts).unwrap_or(prompts_value.clone()),
+                );
+            }
+
+            Ok(JsonRpcResponse::success(response.id, new_result))
+        }
+        _ => {
+            // Not a list method we handle, return as-is
+            Ok(response)
         }
     }
-
-    // Gate 2: Annotate execution.taskSupport based on governance rules
-    // Per MCP Tasks Specification (Protocol Revision 2025-11-25)
-    for tool in &mut tools {
-        let match_result = config.governance.evaluate(&tool.name, source_id);
-        match match_result.action {
-            crate::config::Action::Approve | crate::config::Action::Policy => {
-                // ThoughtGate requires async task mode for approval/policy actions
-                // Set execution.taskSupport = "required" per MCP spec
-                tool.execution = Some(ToolExecution {
-                    task_support: Some(TaskSupport::Required),
-                });
-            }
-            crate::config::Action::Forward | crate::config::Action::Deny => {
-                // Preserve upstream's execution.taskSupport (don't modify)
-                // Note: Deny tools are visible but denied at call-time
-            }
-        }
-    }
-
-    // Rebuild response with filtered/annotated tools
-    let mut new_result = result.clone();
-    if let Some(obj) = new_result.as_object_mut() {
-        obj.insert(
-            "tools".to_string(),
-            serde_json::to_value(&tools).unwrap_or(tools_value.clone()),
-        );
-    }
-
-    Ok(JsonRpcResponse::success(response.id, new_result))
 }
 
 /// Check if a method is a list method that requires response filtering.
@@ -975,11 +1079,13 @@ fn is_list_method(method: &str) -> bool {
 /// Implements: SEP-1686 Section 3.3 (TaskRequired/TaskForbidden)
 ///
 /// - For `action: approve` or `action: policy`: client MUST send `params.task`
-/// - For `action: forward` or `action: deny`: no validation (upstream handles it)
+/// - For `action: forward` or `action: deny`: if client sent task metadata but
+///   upstream doesn't support tasks, return TaskForbidden error
 fn validate_task_metadata(
     request: &McpRequest,
     action: &crate::config::Action,
     tool_name: &str,
+    upstream_supports_tasks: bool,
 ) -> Result<(), ThoughtGateError> {
     let has_task_metadata = request.is_task_augmented();
 
@@ -994,8 +1100,13 @@ fn validate_task_metadata(
             }
         }
         crate::config::Action::Forward | crate::config::Action::Deny => {
-            // Forward: upstream handles task metadata
-            // Deny: will be rejected anyway, don't validate task
+            // TaskForbidden: If client sent task metadata but upstream doesn't support tasks,
+            // we can't forward the task context. Return an error instead of silently dropping it.
+            if has_task_metadata && !upstream_supports_tasks {
+                return Err(ThoughtGateError::TaskForbidden {
+                    tool: tool_name.to_string(),
+                });
+            }
         }
     }
 
@@ -1397,7 +1508,12 @@ async fn route_through_gates(
     // ========================================================================
     // Validate that client sent params.task for actions that require it
     // This is checked AFTER Gate 2 because we need to know the action first
-    validate_task_metadata(&request, &match_result.action, &resource_name)?;
+    validate_task_metadata(
+        &request,
+        &match_result.action,
+        &resource_name,
+        state.capability_cache.upstream_supports_tasks(),
+    )?;
 
     // ========================================================================
     // Route by Gate 2 Action
@@ -2275,8 +2391,8 @@ mod tests {
         let error = &parsed["error"];
         assert_eq!(
             error["code"].as_i64().unwrap(),
-            -32004,
-            "Should be TaskNotFound error code"
+            -32602,
+            "Should be TaskNotFound (Invalid params) error code"
         );
     }
 
@@ -2308,8 +2424,8 @@ mod tests {
         let error = &parsed["error"];
         assert_eq!(
             error["code"].as_i64().unwrap(),
-            -32004,
-            "Should be TaskNotFound error code"
+            -32602,
+            "Should be TaskNotFound (Invalid params) error code"
         );
     }
 
@@ -2341,8 +2457,8 @@ mod tests {
         let error = &parsed["error"];
         assert_eq!(
             error["code"].as_i64().unwrap(),
-            -32004,
-            "Should be TaskNotFound error code"
+            -32602,
+            "Should be TaskNotFound (Invalid params) error code"
         );
     }
 

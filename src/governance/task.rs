@@ -32,6 +32,9 @@ use tokio::sync::Notify;
 // Re-export Sep1686TaskId as TaskId for v0.2 compatibility
 pub use crate::protocol::Sep1686TaskId as TaskId;
 
+// Import TimeoutAction from engine module
+use super::engine::TimeoutAction;
+
 // ============================================================================
 // JSON-RPC ID (for MCP request tracking)
 // ============================================================================
@@ -83,9 +86,21 @@ impl Principal {
     /// Returns a key suitable for rate limiting lookups.
     ///
     /// Implements: REQ-GOV-001/F-009.1
+    ///
+    /// The key includes user_id and session_id when present to provide proper
+    /// isolation between different principals within the same app. Format:
+    /// - `app_name` (base case)
+    /// - `app_name:user_id` (with user)
+    /// - `app_name::session_id` (with session only, double colon indicates no user)
+    /// - `app_name:user_id:session_id` (with both)
     #[must_use]
     pub fn rate_limit_key(&self) -> String {
-        self.app_name.clone()
+        match (&self.user_id, &self.session_id) {
+            (Some(user), Some(session)) => format!("{}:{}:{}", self.app_name, user, session),
+            (Some(user), None) => format!("{}:{}", self.app_name, user),
+            (None, Some(session)) => format!("{}::{}", self.app_name, session),
+            (None, None) => self.app_name.clone(),
+        }
     }
 }
 
@@ -419,6 +434,16 @@ pub struct Task {
     pub result: Option<ToolCallResult>,
     /// Failure info if task failed
     pub failure: Option<FailureInfo>,
+
+    // Timeout behavior
+    /// Action to take when approval times out (captured at task creation)
+    ///
+    /// Implements: REQ-GOV-002/F-006.4 (Timeout Action)
+    ///
+    /// Stored per-task to ensure "complete with state at decision time" semantics.
+    /// If config is hot-reloaded during task lifetime, the original on_timeout
+    /// behavior is preserved.
+    pub on_timeout: TimeoutAction,
 }
 
 impl Task {
@@ -431,6 +456,7 @@ impl Task {
         pre_approval_transformed: ToolCallRequest,
         principal: Principal,
         ttl: Duration,
+        on_timeout: TimeoutAction,
     ) -> Self {
         let id = TaskId::new();
         let now = Utc::now();
@@ -459,6 +485,7 @@ impl Task {
             approval: None,
             result: None,
             failure: None,
+            on_timeout,
         }
     }
 
@@ -823,6 +850,7 @@ impl TaskStore {
         pre_approval_transformed: ToolCallRequest,
         principal: Principal,
         ttl: Option<Duration>,
+        on_timeout: TimeoutAction,
     ) -> Result<Task, TaskError> {
         // F-009.3, F-009.4: Check global capacity
         if self.pending_count() >= self.config.max_pending_global {
@@ -843,8 +871,14 @@ impl TaskStore {
         let ttl = ttl.unwrap_or(self.config.default_ttl);
         let ttl = ttl.clamp(self.config.min_ttl, self.config.max_ttl);
 
-        // Create task
-        let task = Task::new(original_request, pre_approval_transformed, principal, ttl);
+        // Create task with on_timeout captured at creation time
+        let task = Task::new(
+            original_request,
+            pre_approval_transformed,
+            principal,
+            ttl,
+            on_timeout,
+        );
         let task_id = task.id.clone();
         let task_clone = task.clone();
 
@@ -1070,6 +1104,9 @@ impl TaskStore {
     /// Cancels a task (only from InputRequired state).
     ///
     /// Implements: REQ-GOV-001/F-006
+    ///
+    /// This operation is idempotent: cancelling an already-cancelled task
+    /// returns success per SEP-1686 spec requirements.
     pub fn cancel(&self, task_id: &TaskId) -> Result<Task, TaskError> {
         let mut entry = self
             .tasks
@@ -1081,7 +1118,11 @@ impl TaskStore {
         // F-006.1: Only cancel from InputRequired
         if entry.task.status != TaskStatus::InputRequired {
             if entry.task.status.is_terminal() {
-                // F-006.2: Already terminal
+                // F-006.2: Idempotency - already cancelled returns success
+                if entry.task.status == TaskStatus::Cancelled {
+                    return Ok(entry.task.clone());
+                }
+                // F-006.2b: Other terminal states cannot be cancelled
                 return Err(TaskError::AlreadyTerminal {
                     task_id: task_id.clone(),
                     status: entry.task.status,
@@ -1448,6 +1489,7 @@ mod tests {
             test_request(),
             test_principal(),
             Duration::from_secs(600),
+            TimeoutAction::default(),
         );
 
         assert_eq!(task.status, TaskStatus::Working);
@@ -1459,6 +1501,7 @@ mod tests {
         assert!(task.approval.is_none());
         assert!(task.result.is_none());
         assert!(task.failure.is_none());
+        assert_eq!(task.on_timeout, TimeoutAction::Deny);
     }
 
     /// Tests task transition records audit trail.
@@ -1471,6 +1514,7 @@ mod tests {
             test_request(),
             test_principal(),
             Duration::from_secs(600),
+            TimeoutAction::default(),
         );
 
         task.transition(
@@ -1499,6 +1543,7 @@ mod tests {
             test_request(),
             test_principal(),
             Duration::from_secs(600),
+            TimeoutAction::default(),
         );
 
         // Get to a terminal state
@@ -1520,6 +1565,7 @@ mod tests {
             test_request(),
             test_principal(),
             Duration::from_secs(600),
+            TimeoutAction::default(),
         );
 
         // Correct expected status
@@ -1546,7 +1592,13 @@ mod tests {
         let store = TaskStore::with_defaults();
 
         let task = store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
 
         assert_eq!(task.status, TaskStatus::Working);
@@ -1581,20 +1633,44 @@ mod tests {
 
         // Create up to limit
         store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
         store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
 
         // Third should fail
-        let result = store.create(test_request(), test_request(), test_principal(), None);
+        let result = store.create(
+            test_request(),
+            test_request(),
+            test_principal(),
+            None,
+            TimeoutAction::default(),
+        );
         assert!(matches!(result, Err(TaskError::RateLimited { .. })));
 
         // Different principal should work
         let other_principal = Principal::new("other-app");
         store
-            .create(test_request(), test_request(), other_principal, None)
+            .create(
+                test_request(),
+                test_request(),
+                other_principal,
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
     }
 
@@ -1616,6 +1692,7 @@ mod tests {
                 test_request(),
                 Principal::new("app-1"),
                 None,
+                TimeoutAction::default(),
             )
             .unwrap();
         store
@@ -1624,6 +1701,7 @@ mod tests {
                 test_request(),
                 Principal::new("app-2"),
                 None,
+                TimeoutAction::default(),
             )
             .unwrap();
 
@@ -1632,6 +1710,7 @@ mod tests {
             test_request(),
             Principal::new("app-3"),
             None,
+            TimeoutAction::default(),
         );
         assert!(matches!(result, Err(TaskError::CapacityExceeded)));
     }
@@ -1644,7 +1723,13 @@ mod tests {
         let store = TaskStore::with_defaults();
 
         let task = store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
 
         // Transition to InputRequired first
@@ -1666,7 +1751,13 @@ mod tests {
         let store = TaskStore::with_defaults();
 
         let task = store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
 
         // Complete the task
@@ -1704,7 +1795,13 @@ mod tests {
         let store = TaskStore::with_defaults();
 
         let task = store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
 
         // Move to Executing
@@ -1745,7 +1842,13 @@ mod tests {
         let store = TaskStore::new(config);
 
         let task = store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
 
         // Transition to InputRequired (expiration is allowed from this state)
@@ -1772,7 +1875,13 @@ mod tests {
         let store = TaskStore::with_defaults();
 
         let task = store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
 
         // First transition succeeds
@@ -1804,7 +1913,13 @@ mod tests {
         // Create 3 tasks
         for _ in 0..3 {
             store
-                .create(test_request(), test_request(), principal.clone(), None)
+                .create(
+                    test_request(),
+                    test_request(),
+                    principal.clone(),
+                    None,
+                    TimeoutAction::default(),
+                )
                 .unwrap();
         }
 
@@ -1835,7 +1950,13 @@ mod tests {
         // Create 3 pending tasks
         for _ in 0..3 {
             store
-                .create(test_request(), test_request(), test_principal(), None)
+                .create(
+                    test_request(),
+                    test_request(),
+                    test_principal(),
+                    None,
+                    TimeoutAction::default(),
+                )
                 .unwrap();
         }
 
@@ -1910,7 +2031,13 @@ mod tests {
         let store = TaskStore::with_defaults();
 
         let task = store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
 
         // Move to InputRequired
@@ -1941,7 +2068,13 @@ mod tests {
         let store = TaskStore::with_defaults();
 
         let task = store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
 
         // Move to InputRequired
@@ -1972,7 +2105,13 @@ mod tests {
 
         // Create
         let task = store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
         assert_eq!(task.status, TaskStatus::Working);
         assert_eq!(store.pending_count(), 1);
@@ -2015,7 +2154,13 @@ mod tests {
         let store = TaskStore::with_defaults();
 
         let task = store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
 
         let failure = FailureInfo {
@@ -2040,7 +2185,13 @@ mod tests {
         let store = TaskStore::new(config);
 
         let task = store
-            .create(test_request(), test_request(), test_principal(), None)
+            .create(
+                test_request(),
+                test_request(),
+                test_principal(),
+                None,
+                TimeoutAction::default(),
+            )
             .unwrap();
 
         // Complete it

@@ -983,6 +983,7 @@ mod tests {
             approval: None,
             result: None,
             failure: None,
+            on_timeout: crate::governance::TimeoutAction::default(),
         }
     }
 
