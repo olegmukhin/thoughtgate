@@ -74,16 +74,17 @@ impl SlackConfig {
     ///
     /// # Environment Variables
     ///
-    /// - `SLACK_BOT_TOKEN` (required) - Bot token for Slack API
-    /// - `SLACK_CHANNEL` (default: #approvals) - Channel for approval messages
-    /// - `SLACK_APPROVE_REACTION` (default: +1) - Reaction emoji for approval
-    /// - `SLACK_REJECT_REACTION` (default: -1) - Reaction emoji for rejection
+    /// - `THOUGHTGATE_SLACK_BOT_TOKEN` (required) - Bot token for Slack API
+    /// - `THOUGHTGATE_SLACK_CHANNEL` (default: #approvals) - Channel for approval messages
+    /// - `THOUGHTGATE_SLACK_APPROVE_REACTION` (default: +1) - Reaction emoji for approval
+    /// - `THOUGHTGATE_SLACK_REJECT_REACTION` (default: -1) - Reaction emoji for rejection
     ///
     /// # Errors
     ///
-    /// Returns `AdapterError::InvalidToken` if SLACK_BOT_TOKEN is not set.
+    /// Returns `AdapterError::InvalidToken` if THOUGHTGATE_SLACK_BOT_TOKEN is not set.
     pub fn from_env() -> Result<Self, AdapterError> {
-        let bot_token = std::env::var("SLACK_BOT_TOKEN").map_err(|_| AdapterError::InvalidToken)?;
+        let bot_token =
+            std::env::var("THOUGHTGATE_SLACK_BOT_TOKEN").map_err(|_| AdapterError::InvalidToken)?;
 
         let initial_poll_interval = std::env::var("THOUGHTGATE_APPROVAL_POLL_INTERVAL_SECS")
             .ok()
@@ -93,10 +94,11 @@ impl SlackConfig {
 
         Ok(Self {
             bot_token,
-            channel: std::env::var("SLACK_CHANNEL").unwrap_or_else(|_| "#approvals".to_string()),
-            approve_reaction: std::env::var("SLACK_APPROVE_REACTION")
+            channel: std::env::var("THOUGHTGATE_SLACK_CHANNEL")
+                .unwrap_or_else(|_| "#approvals".to_string()),
+            approve_reaction: std::env::var("THOUGHTGATE_SLACK_APPROVE_REACTION")
                 .unwrap_or_else(|_| "+1".to_string()),
-            reject_reaction: std::env::var("SLACK_REJECT_REACTION")
+            reject_reaction: std::env::var("THOUGHTGATE_SLACK_REJECT_REACTION")
                 .unwrap_or_else(|_| "-1".to_string()),
             api_timeout: Duration::from_secs(10),
             initial_poll_interval,
